@@ -44,6 +44,19 @@ bash scripts/check-contracts.sh   # 改過任何 types/index.d.ts 後執行
 
 可能有好幾個 Claude Code session 同時在改這裡的檔案，動手前先看 `git status`。
 
+### 推送前的私人資訊檢查
+
+`scripts/git-hooks/pre-push` 會在 `git push` 前掃描要送出去的 commit：新增的行、檔名、作者與提交者、commit 訊息。找到私有網段 IP，或私人關鍵字清單裡的字，就擋下推送。每個 clone 要做兩件事：
+
+```sh
+git config core.hooksPath scripts/git-hooks
+# 這台電腦的私人關鍵字清單：一行一個延伸正規表示式，不分大小寫，# 開頭是註解
+$EDITOR ~/.config/git/private-patterns
+```
+
+- 清單本身就是私人資訊，只放在每台電腦，不進 repo。清單檔不存在、或裡面有寫錯的正規表示式時，一律擋下推送。
+- 確定是誤判時用 `git push --no-verify`。
+
 ## 授權
 
 `clean-view` 與 `gitlab-sync` 採用根目錄的 [MIT License](LICENSE)。`where-am-i`（MIT）與 `next-steps`（Apache 2.0）是 fork，依各自資料夾裡的 LICENSE。
