@@ -1,0 +1,6 @@
+{
+  "name": "clean-view",
+  "version": "0.1.0",
+  "description": "工具呼叫收成一行淡色摘要，計畫清單顯示在 prompt 上方；/clean 切換",
+  "types": "./types/index.d.ts"
+}

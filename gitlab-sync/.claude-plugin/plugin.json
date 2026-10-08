@@ -1,0 +1,13 @@
+{
+  "name": "gitlab-sync",
+  "version": "0.1.0",
+  "description": "輸入框上方一行顯示目前分支跟遠端差幾個 commit 與還開著的 issue 張數；GitLab 與 GitHub 上自己開的、指派給自己的 issue／MR（PR），以及要自己審查的 MR（PR）有新動態時通知，/gitlab、/github 查看，也會列出自己開的或指派給自己、還開著的 issue（在 repo 裡只列這個專案的）；GitHub 的 token 跟 gh CLI 共用",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "gitlabUrl": {
+      "type": "string",
+      "title": "GitLab 網址",
+      "description": "GitLab 的根網址（例如 https://gitlab.example.com，不含 /api/v4），每台電腦各自設定；沒設定時不檢查 GitLab。token 先讀環境變數 GITLAB_TOKEN，是空的或被拒絕（401）時改讀 macOS 鑰匙圈的 gitlab-token"
+    }
+  }
+}

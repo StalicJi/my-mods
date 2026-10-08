@@ -1,0 +1,9 @@
+# 系統檔
+.DS_Store
+
+# 引擎從資料夾載入 mod 時自動產生的型別檔，每個版本會重寫
+*/.claude-plugin/types/
+
+# 型別檢查或測試的暫存產物
+node_modules/
+*.tsbuildinfo

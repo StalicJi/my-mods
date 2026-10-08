@@ -1,0 +1,10 @@
+{
+  "name": "where-am-i",
+  "version": "0.1.4-tw.1",
+  "description": "繁體中文版（fork 自 hamzafer/claude-code-mods 0.1.4）：輸入框上方的進度摘要（goal、now、waiting、next），/where 顯示較長的回顧",
+  "author": {
+    "name": "Hamza Zafar",
+    "url": "https://github.com/hamzafer"
+  },
+  "types": "./types/index.d.ts"
+}
