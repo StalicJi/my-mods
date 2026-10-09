@@ -1,0 +1,9 @@
+{
+  "name": "agent-panel",
+  "version": "0.1.0",
+  "description": "派出子代理時跳出面板，顯示每個子代理的模型、effort、工具次數、正在做什麼、ctx、token、估算費用與時間；/agents 開關",
+  "author": {
+    "name": "StalicJi"
+  },
+  "types": "./types/index.d.ts"
+}
