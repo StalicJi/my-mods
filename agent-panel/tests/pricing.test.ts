@@ -36,3 +36,12 @@ test('ctx % 以提示 token 除以 context 上限', () => {
   expect(contextPercent('claude-haiku-4-5', { ...usage, cache_read_input_tokens: 45_000 })).toBe(25)
   expect(contextPercent('gpt-x', usage)).toBeNull()
 })
+
+test('Bedrock 跨區域前綴與版本後綴的寫法也對到同一個 key', () => {
+  expect(modelInfo('us.anthropic.claude-opus-4-6-v1:0')).toMatchObject({ key: 'opus-4-6', name: 'Opus 4.6', family: 'opus' })
+  expect(modelInfo('global.anthropic.claude-sonnet-4-6-20251001-v1:0')).toMatchObject({ key: 'sonnet-4-6', name: 'Sonnet 4.6' })
+  expect(modelInfo('eu.anthropic.claude-haiku-4-5-20251001-v1:0')).toMatchObject({ key: 'haiku-4-5', contextWindow: 200_000 })
+  expect(modelInfo('apac.anthropic.claude-opus-5-5')).toMatchObject({ key: 'opus-5-5' })
+  const usage = { input_tokens: 1000, output_tokens: 2000, cache_read_input_tokens: 10_000, cache_creation_input_tokens: 5000 }
+  expect(requestCostUsd('us.anthropic.claude-opus-4-6-v1:0', usage)).not.toBeNull()
+})

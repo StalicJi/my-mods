@@ -48,9 +48,14 @@ const PRICES: Record<string, PriceEntry> = {
 // 系列、主版本、次版本（一到兩位數），後面可能接 8 位數的日期
 const MODEL_ID = /^claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$/
 
-// 同一個模型有好幾種寫法：Bedrock 的 anthropic. 前綴、[1m] 這類後綴、Vertex 的 @ 日期後綴
+// 同一個模型有好幾種寫法：Bedrock 的 anthropic. 前綴（跨區域時前面還有 us.、eu.、apac.、global.）
+// 與 -v1:0 版本後綴、[1m] 這類後綴、Vertex 的 @ 日期後綴
 function bareModelId(modelId: string) {
-  return modelId.replace(/^anthropic\./, '').replace(/\[[^\]]*\]$/, '').replace(/@.*$/, '')
+  return modelId
+    .replace(/^(?:[a-z]+(?:-[a-z]+)*\.)?anthropic\./, '')
+    .replace(/-v\d+:\d+$/, '')
+    .replace(/\[[^\]]*\]$/, '')
+    .replace(/@.*$/, '')
 }
 
 export function modelInfo(modelId: string): ModelInfo {

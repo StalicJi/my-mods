@@ -4,7 +4,7 @@ import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { AgentRow, Batch, TokenUsage } from '../types'
 import { addAgent, batchTotals, finishAgent, hasRunning, recordReported, recordStep, recordToolCall, seedRunning } from './batch'
-import { agentCard, colorRuns, describeTool, formatCost, formatElapsed, formatTokens, splitSections, summaryMode } from './layout'
+import { agentCard, colorRuns, describeTool, fitToWidth, formatCost, formatElapsed, formatTokens, splitSections, summaryMode } from './layout'
 
 const PANE_ID = 'agent-panel'
 const PANE_TITLE = 'Agents'
@@ -16,6 +16,8 @@ const EMPTY_HINT = '這個 session 還沒有派出子代理'
 const ANIMATION_MS = 200
 const BAR_CELL = '▆'
 const SEPARATOR = '─'
+// 統計方框左右各一格框線、一格內距
+const TILE_CHROME_COLUMNS = 4
 
 // 狀態由 host 保存，熱重載後仍在
 const batchAtom = atom({ plugin: 'agent-panel', key: 'batch' } as const, null as Batch | null)
@@ -241,6 +243,8 @@ export const register: Register = on => {
     const { running, finished } = splitSections(batch)
     const lastId = [...running, ...finished].at(-1)?.id
     const tileWidth = Math.floor(columns / 3)
+    // 值放不下時截斷，不讓格子折行變高
+    const tileValue = (value: string) => fitToWidth(value, tileWidth - TILE_CHROME_COLUMNS)
 
     const section = (title: string, agents: AgentRow[]) =>
       agents.length > 0 && (
@@ -284,12 +288,12 @@ export const register: Register = on => {
             ].map(([label, value]) => (
               <Box flexDirection="column" borderStyle="round" width={tileWidth} paddingX={1}>
                 <Text dimColor>{label}</Text>
-                <Text bold>{value}</Text>
+                <Text bold>{tileValue(value!)}</Text>
               </Box>
             ))}
           </Box>
         ) : (
-          <Text>{`${cost} · ${tokens} · ${time}`}</Text>
+          <Text>{fitToWidth(`${cost} · ${tokens} · ${time}`, columns)}</Text>
         )}
         {section('Running', running)}
         {section('Finished', finished)}

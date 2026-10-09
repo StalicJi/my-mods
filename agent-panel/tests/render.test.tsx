@@ -58,3 +58,19 @@ test('8 個子代理全部畫出來', async ($, on) => {
   expect(await ui.findAll({ type: 'Text', text: /^● \S/ })).toHaveLength(8)
   await ui.unmount()
 })
+
+test('統計三格的值放不下時截斷，不折行', async ($, on) => {
+  // 36 欄：每格寬 12，扣掉框線與內距剩 8 格，放不下 9 格的 ≈$12.34+?
+  const ui = await mountWith($, on, [row('a', { costUsd: 12.34, hasUnpricedUsage: true })], 36)
+  // 要精確比對：卡片的用量列也包含完整費用
+  expect(await ui.find({ type: 'Text', text: /^≈\$12\.34\+\?$/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^≈\$12\.34…$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('單行統計放不下時截斷，不折行', async ($, on) => {
+  // 20 欄：「≈$12.34+? · 27k · 0:00」寬 22
+  const ui = await mountWith($, on, [row('a', { costUsd: 12.34, hasUnpricedUsage: true })], 20)
+  expect(await ui.find({ type: 'Text', text: /^≈\$12\.34\+\? · 27k · 0…$/ })).toBeDefined()
+  await ui.unmount()
+})
