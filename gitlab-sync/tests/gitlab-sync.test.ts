@@ -1,11 +1,11 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { gitlabProjectOf, noteEvents, stateEvents, toItem, toNote, toOpenIssue } from '../hooks/gitlab'
+import { gitlabProjectOf, noteEvents, stateEvents, toItem, toNote, toOpenIssue, workItemKind } from '../hooks/gitlab'
 import type { GitlabItem, GitlabNote } from '../hooks/gitlab'
 import { bandSegments, remoteSegment, repoReport, startupToastText, toastText } from '../hooks/register'
-import { clipColumns, describeEvent, excerptOf, formatAgo, inProject, openIssueLines, remoteHostOf } from '../hooks/shared'
+import { clipColumns, describeEvent, excerptOf, formatAgo, groupByKind, inProject, openIssueLines, remoteHostOf } from '../hooks/shared'
 import type { ForgeEvent } from '../hooks/shared'
-import type { InboxStatus, RepoSync } from '../types'
+import type { InboxStatus, KindCount, RepoSync } from '../types'
 
 const GITLAB_URL = 'http://gitlab.test'
 const OPTIONS = { options: { gitlabUrl: `${GITLAB_URL}/` } }
@@ -13,7 +13,12 @@ const T0 = Date.parse('2026-10-08T03:00:00.000Z')
 const iso = (ms: number) => new Date(ms).toISOString()
 const ME = { id: 6, username: 'alice' }
 const BOB = { id: 9, username: 'bob' }
-const NO_INBOX: InboxStatus = { unreadCount: 0, problem: null, openIssueCount: null }
+const NO_INBOX: InboxStatus = { unreadCount: 0, problem: null, openCounts: null }
+const GITLAB_KINDS = ['Task', 'Issue']
+const counts = (task: number, issue: number): KindCount[] => [
+  { kind: 'Task', count: task },
+  { kind: 'Issue', count: issue },
+]
 const SYNCED: RepoSync = { branch: 'develop', isDetached: false, upstream: 'origin/develop', ahead: 0, behind: 0, dirtyCount: 0, isFetchFailed: false, remoteHost: 'gitlab.example.com', gitlabProject: 'acme/team/handbook', githubRepo: null }
 const BAND_PROPS = { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 160 }
 const GITLAB_NAMES = { label: 'GitLab', command: 'gitlab' }
@@ -172,40 +177,50 @@ describe('文字與畫面', () => {
     expect(texts(null)).toEqual([])
   })
 
-  test('band 的還開著的 issue 張數：排在最後，0 張也顯示，還沒查到時不顯示；數字 0 張綠色、有張數紅色', () => {
+  test('band 的還開著的張數：Task、Issue 分開算，排在最後，0 張也顯示，還沒查到時不顯示；指令提示只接在最後一段；數字 0 張綠色、有張數紅色', () => {
     const texts = (repo: RepoSync | null, inbox: InboxStatus) => bandSegments(repo, inbox).map(segment => segment.text)
-    expect(texts(SYNCED, { ...NO_INBOX, openIssueCount: 1 })).toEqual(['GitLab', '⎇ develop', '✓ 已同步', 'Issue 1 張（/gitlab）'])
-    expect(texts({ ...SYNCED, dirtyCount: 2 }, { ...NO_INBOX, unreadCount: 3, openIssueCount: 4 })).toEqual([
+    expect(texts(SYNCED, { ...NO_INBOX, openCounts: counts(2, 1) })).toEqual(['GitLab', '⎇ develop', '✓ 已同步', 'Task 2 張', 'Issue 1 張（/gitlab）'])
+    expect(texts({ ...SYNCED, dirtyCount: 2 }, { ...NO_INBOX, unreadCount: 3, openCounts: counts(0, 4) })).toEqual([
       'GitLab',
       '⎇ develop',
       '✓ 已同步',
       '2 個檔案未提交',
       'GitLab 3 則新動態（/gitlab）',
+      'Task 0 張',
       'Issue 4 張（/gitlab）',
     ])
-    expect(texts(SYNCED, { ...NO_INBOX, openIssueCount: 0 })).toEqual(['GitLab', '⎇ develop', '✓ 已同步', 'Issue 0 張（/gitlab）'])
+    expect(texts(SYNCED, { ...NO_INBOX, openCounts: counts(0, 0) })).toEqual(['GitLab', '⎇ develop', '✓ 已同步', 'Task 0 張', 'Issue 0 張（/gitlab）'])
     expect(texts(SYNCED, NO_INBOX)).toEqual(['GitLab', '⎇ develop', '✓ 已同步'])
-    const issueSegment = (count: number) => bandSegments(SYNCED, { ...NO_INBOX, openIssueCount: count }).at(-1)
-    expect(issueSegment(0)?.spans).toEqual([
+    // 其他類型有才會出現在計數裡，接在後面，提示跟著移到最後一段
+    expect(texts(SYNCED, { ...NO_INBOX, openCounts: [...counts(1, 0), { kind: 'Incident', count: 1 }] }).slice(3)).toEqual(['Task 1 張', 'Issue 0 張', 'Incident 1 張（/gitlab）'])
+    const segments = bandSegments(SYNCED, { ...NO_INBOX, openCounts: counts(3, 0) })
+    expect(segments.at(-2)?.spans).toEqual([
+      { text: 'Task ', isDim: true },
+      { text: '3', color: 'error', isBold: true },
+      { text: ' 張', isDim: true },
+    ])
+    expect(segments.at(-1)?.spans).toEqual([
       { text: 'Issue ', isDim: true },
       { text: '0', color: 'success', isBold: true },
       { text: ' 張（/gitlab）', isDim: true },
     ])
-    expect(issueSegment(3)?.spans?.[1]).toEqual({ text: '3', color: 'error', isBold: true })
+    // 熱重載後 $.state 可能還是舊版的形狀（只有 openIssueCount）：先不顯示張數，也不出錯
+    const legacy = { unreadCount: 0, problem: null, openIssueCount: 2 } as unknown as InboxStatus
+    expect(texts(SYNCED, legacy)).toEqual(['GitLab', '⎇ develop', '✓ 已同步'])
   })
 
-  test('band 最前面標示來源：設定的 GitLab、GitHub、本機或主機名稱；不在設定的 GitLab 專案時不顯示 Issue 張數，新動態照常', () => {
+  test('band 最前面標示來源：設定的 GitLab、GitHub、本機或主機名稱；不在設定的 GitLab 專案時不顯示張數，新動態照常', () => {
     const texts = (repo: RepoSync | null, inbox: InboxStatus) => bandSegments(repo, inbox).map(segment => segment.text)
     const github: RepoSync = { ...SYNCED, remoteHost: 'github.com', gitlabProject: null }
     const local: RepoSync = { ...SYNCED, upstream: null, remoteHost: null, gitlabProject: null }
     const bitbucket: RepoSync = { ...SYNCED, remoteHost: 'bitbucket.org', gitlabProject: null }
     expect(remoteSegment(SYNCED).text).toBe('GitLab')
-    expect(texts(github, { ...NO_INBOX, openIssueCount: 3 })).toEqual(['GitHub', '⎇ develop', '✓ 已同步'])
-    expect(texts(local, { ...NO_INBOX, openIssueCount: 3 })).toEqual(['本機', '⎇ develop', '沒有遠端分支（還沒 push？）'])
-    expect(texts(bitbucket, { ...NO_INBOX, openIssueCount: 3 })).toEqual(['bitbucket.org', '⎇ develop', '✓ 已同步'])
-    expect(texts(github, { ...NO_INBOX, unreadCount: 2, openIssueCount: 3 })).toEqual(['GitHub', '⎇ develop', '✓ 已同步', 'GitLab 2 則新動態（/gitlab）'])
+    expect(texts(github, { ...NO_INBOX, openCounts: counts(1, 3) })).toEqual(['GitHub', '⎇ develop', '✓ 已同步'])
+    expect(texts(local, { ...NO_INBOX, openCounts: counts(1, 3) })).toEqual(['本機', '⎇ develop', '沒有遠端分支（還沒 push？）'])
+    expect(texts(bitbucket, { ...NO_INBOX, openCounts: counts(1, 3) })).toEqual(['bitbucket.org', '⎇ develop', '✓ 已同步'])
+    expect(texts(github, { ...NO_INBOX, unreadCount: 2, openCounts: counts(1, 3) })).toEqual(['GitHub', '⎇ develop', '✓ 已同步', 'GitLab 2 則新動態（/gitlab）'])
     // 不在 repo 的目錄也一樣：張數是全部專案加總，不顯示
-    expect(texts(null, { ...NO_INBOX, openIssueCount: 3 })).toEqual([])
+    expect(texts(null, { ...NO_INBOX, openCounts: counts(1, 3) })).toEqual([])
   })
 
   test('來源標示的顏色：GitLab Claude 橘、GitHub 主題文字色（深色主題是白色）、本機與其他主機暗色', () => {
@@ -219,13 +234,14 @@ describe('文字與畫面', () => {
     expect(style({ ...SYNCED, remoteHost: 'bitbucket.org', gitlabProject: null })).toEqual({ text: 'bitbucket.org', color: undefined, isDim: true })
   })
 
-  test('還開著的 issue：寫出誰開的、指派給誰；一張都沒有時寫 0 張', () => {
+  test('還開著的項目：寫出誰開的、指派給誰；一張都沒有的類型寫 0 張', () => {
     const issue = toOpenIssue(ISSUE_RAW)
-    expect(issue).toMatchObject({ ref: 'web-app#5', author: ME, assignees: [BOB] })
+    expect(issue).toMatchObject({ kind: 'Issue', ref: 'web-app#5', author: ME, assignees: [BOB] })
     expect(toOpenIssue({ ...ISSUE_RAW, author: null })).toBe(null)
     const unassigned = toOpenIssue({ ...ISSUE_RAW, assignees: [] })
-    expect(openIssueLines([issue!, unassigned!], ME, T0, null)).toEqual([
-      '你開的或指派給你、還開著的 issue 2 張：',
+    expect(openIssueLines([issue!, unassigned!], ME, T0, null, GITLAB_KINDS)).toEqual([
+      '你開的或指派給你、還開著的 Task 0 張。',
+      '你開的或指派給你、還開著的 Issue 2 張：',
       `• web-app#5  ${ISSUE_RAW.title}`,
       '  你開的，指派給 bob，1 天前更新',
       `  ${ISSUE_RAW.web_url}`,
@@ -233,7 +249,30 @@ describe('文字與畫面', () => {
       '  你開的，還沒指派，1 天前更新',
       `  ${ISSUE_RAW.web_url}`,
     ])
-    expect(openIssueLines([], ME, T0, null)).toEqual(['你開的或指派給你、還開著的 issue 0 張。'])
+    expect(openIssueLines([], ME, T0, null, GITLAB_KINDS)).toEqual(['你開的或指派給你、還開著的 Task 0 張。', '你開的或指派給你、還開著的 Issue 0 張。'])
+  })
+
+  test('GitLab 的 work item 依類型（issue_type）分：Task 在前、Issue 在後；沒有類型欄位的舊版 GitLab 當成 Issue；其他類型有才列、接在後面', () => {
+    expect(toOpenIssue({ ...ISSUE_RAW, issue_type: 'task' })?.kind).toBe('Task')
+    expect(toOpenIssue({ ...ISSUE_RAW, issue_type: 'issue' })?.kind).toBe('Issue')
+    expect(toOpenIssue(ISSUE_RAW)?.kind).toBe('Issue')
+    expect(workItemKind('incident')).toBe('Incident')
+    expect(workItemKind('test_case')).toBe('Test case')
+    expect(workItemKind('requirement')).toBe('requirement')
+    const task = toOpenIssue({ ...ISSUE_RAW, id: 70, iid: 7, issue_type: 'task', title: '導入電表', references: { full: 'acme/web/web-app#7' } })!
+    const incident = toOpenIssue({ ...ISSUE_RAW, id: 71, iid: 8, issue_type: 'incident', title: '服務中斷', references: { full: 'acme/web/web-app#8' } })!
+    expect(groupByKind([incident, task], GITLAB_KINDS).map(group => [group.kind, group.issues.length])).toEqual([
+      ['Task', 1],
+      ['Issue', 0],
+      ['Incident', 1],
+    ])
+    expect(openIssueLines([task], ME, T0, 'acme/web/web-app', GITLAB_KINDS)).toEqual([
+      '這個 repo（web-app）裡你開的或指派給你、還開著的 Task 1 張：',
+      '• web-app#7  導入電表',
+      '  你開的，指派給 bob，1 天前更新',
+      `  ${ISSUE_RAW.web_url}`,
+      '這個 repo（web-app）裡你開的或指派給你、還開著的 Issue 0 張。',
+    ])
   })
 
   test('在 GitLab 專案的 repo 裡只列這個專案的 issue，路徑不分大小寫，不知道專案的照列；這個專案沒有時寫 0 張', () => {
@@ -244,13 +283,17 @@ describe('文字與畫面', () => {
     expect(noPath.projectPath).toBe(null)
     expect(inProject([site, device, noPath], 'Acme/Backend/api-server')).toEqual([device, noPath])
     expect(inProject([site, device, noPath], null)).toEqual([site, device, noPath])
-    expect(openIssueLines([site, device], ME, T0, 'acme/web/web-app')).toEqual([
-      '這個 repo（web-app）裡你開的或指派給你、還開著的 issue 1 張：',
+    expect(openIssueLines([site, device], ME, T0, 'acme/web/web-app', GITLAB_KINDS)).toEqual([
+      '這個 repo（web-app）裡你開的或指派給你、還開著的 Task 0 張。',
+      '這個 repo（web-app）裡你開的或指派給你、還開著的 Issue 1 張：',
       `• web-app#5  ${ISSUE_RAW.title}`,
       '  你開的，指派給 bob，1 天前更新',
       `  ${ISSUE_RAW.web_url}`,
     ])
-    expect(openIssueLines([site, device], ME, T0, 'acme/team/handbook')).toEqual(['這個 repo（handbook）裡你開的或指派給你、還開著的 issue 0 張。'])
+    expect(openIssueLines([site, device], ME, T0, 'acme/team/handbook', GITLAB_KINDS)).toEqual([
+      '這個 repo（handbook）裡你開的或指派給你、還開著的 Task 0 張。',
+      '這個 repo（handbook）裡你開的或指派給你、還開著的 Issue 0 張。',
+    ])
   })
 
   test('/gitlab 的分支說明', () => {
@@ -382,7 +425,7 @@ describe('整合情境', () => {
     )
 
     await start($, on)
-    expect(await runGitlab($)).toBe('分支 develop（比對 origin/develop）：✓ 已同步，沒有未提交的檔案\nGitLab 新動態 0 則。\n你開的或指派給你、還開著的 issue 0 張。')
+    expect(await runGitlab($)).toBe('分支 develop（比對 origin/develop）：✓ 已同步，沒有未提交的檔案\nGitLab 新動態 0 則。\n你開的或指派給你、還開著的 Task 0 張。\n你開的或指派給你、還開著的 Issue 0 張。')
 
     notes = [{ id: 9551, system: false, body: '謝謝回報，查清楚了。', created_at: iso(T0 + 60_000), author: BOB }]
     await clock.advance(3 * 60_000) // 背景每分鐘一輪，GitLab 每兩分鐘輪詢一次
@@ -440,7 +483,7 @@ describe('整合情境', () => {
     expect(requests.some(request => request.url.includes('/merge_requests?scope=reviews_for_me&'))).toBe(true)
   })
 
-  test('/gitlab 列出自己開的或指派給自己、還開著的 issue：兩個範圍合併去重，最近更新的在前', OPTIONS, async ($, on) => {
+  test('/gitlab 列出自己開的或指派給自己、還開著的項目：兩個範圍合併去重，依類型分段（Task 在前），同類型最近更新的在前', OPTIONS, async ($, on) => {
     mock.clock(on, { now: T0 })
     mock.store(on)
     const requests: { url: string; token: string | undefined }[] = []
@@ -457,7 +500,8 @@ describe('整合情境', () => {
       web_url: `${GITLAB_URL}/acme/web/web-app/-/work_items/${iid}`,
       references: { full: `acme/web/web-app#${iid}` },
     })
-    const assignedToMe = issueRaw(7, '請幫忙驗證付款流程', BOB, [ME, { id: 12, username: 'carol' }], T0 - 3_600_000)
+    // 別人指派過來的是 Task（GitLab 的 work item 類型），自己開的是 Issue
+    const assignedToMe = { ...issueRaw(7, '請幫忙驗證付款流程', BOB, [ME, { id: 12, username: 'carol' }], T0 - 3_600_000), issue_type: 'task' }
     const mineAndAssignedToMe = issueRaw(8, '自己記的待辦', ME, [ME], T0 - 60_000)
     fakeGitlab(
       on,
@@ -476,8 +520,9 @@ describe('整合情境', () => {
 
     await start($, on)
     const report = await runGitlab($)
-    expect(report).toContain('GitLab 新動態 0 則。\n你開的或指派給你、還開著的 issue 3 張：')
-    expect([...report.matchAll(/^• (\S+)/gm)].map(match => match[1])).toEqual(['web-app#8', 'web-app#7', 'web-app#5'])
+    expect(report).toContain('GitLab 新動態 0 則。\n你開的或指派給你、還開著的 Task 1 張：\n• web-app#7')
+    expect(report).toContain('\n你開的或指派給你、還開著的 Issue 2 張：\n• web-app#8')
+    expect([...report.matchAll(/^• (\S+)/gm)].map(match => match[1])).toEqual(['web-app#7', 'web-app#8', 'web-app#5'])
     expect(report).toContain('• web-app#8  自己記的待辦\n  你開的，指派給你，1 分鐘前更新')
     expect(report).toContain('• web-app#7  請幫忙驗證付款流程\n  bob 開的，指派給你、carol，1 小時前更新')
     expect(report).toContain('  你開的，指派給 bob，1 天前更新')
@@ -488,7 +533,7 @@ describe('整合情境', () => {
     // 沒有 remote 的 repo：band 標「本機」，不顯示全部專案加總的張數
     const band = await bandText($)
     expect(band).toContain('本機  ·  ⎇ main  ·  ✓ 已同步')
-    expect(band).not.toContain('Issue ')
+    expect(band).not.toContain(' 張（/gitlab）')
   })
 
   test('在 GitLab 專案的 repo 裡只列這個專案的 issue，band 張數也只算這個專案；換 repo 時回合結束就跟著換', OPTIONS, async ($, on) => {
@@ -516,24 +561,24 @@ describe('整合情境', () => {
 
     await start($, on)
     const report = await runGitlab($)
-    expect(report).toContain('這個 repo（web-app）裡你開的或指派給你、還開著的 issue 1 張：\n• web-app#5')
+    expect(report).toContain('這個 repo（web-app）裡你開的或指派給你、還開著的 Issue 1 張：\n• web-app#5')
     expect(report).not.toContain('api-server')
-    expect(await bandText($)).toContain('Issue 1 張（/gitlab）')
+    expect(await bandText($)).toContain('Task 0 張  ·  Issue 1 張（/gitlab）')
 
     // 換到一張都沒有的專案：回合結束只讀本機就重算，不必等下一次輪詢
     repo = { ...siteRepo, root: '/work-l', remotes: { gitlab: `${GITLAB_URL}/acme/team/handbook.git` } }
     await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1 } as any)
     await clock.advance(0)
-    expect(await bandText($)).toContain('Issue 0 張（/gitlab）')
-    expect(await runGitlab($)).toContain('這個 repo（handbook）裡你開的或指派給你、還開著的 issue 0 張。')
+    expect(await bandText($)).toContain('Task 0 張  ·  Issue 0 張（/gitlab）')
+    expect(await runGitlab($)).toContain('這個 repo（handbook）裡你開的或指派給你、還開著的 Task 0 張。\n這個 repo（handbook）裡你開的或指派給你、還開著的 Issue 0 張。')
 
     // remote 在 GitHub：/gitlab 不分專案全部列；band 標 GitHub、不顯示張數
     repo = { ...siteRepo, root: '/work-m', remotes: { gitlab: 'git@github.com:someone/repo.git' } }
     const all = await runGitlab($)
-    expect(all).toContain('\n你開的或指派給你、還開著的 issue 2 張：')
+    expect(all).toContain('\n你開的或指派給你、還開著的 Issue 2 張：')
     const githubBand = await bandText($)
     expect(githubBand).toContain('GitHub  ·  ⎇ main')
-    expect(githubBand).not.toContain('Issue ')
+    expect(githubBand).not.toContain(' 張（/gitlab）')
   })
 
   test('在 GitLab 專案的 repo 裡未讀動態只列、只標已讀這個專案的，band 則數也只算這個專案；別的專案照跳 toast 並寫明去哪看', OPTIONS, async ($, on) => {
@@ -657,7 +702,7 @@ describe('整合情境', () => {
 
     await start($, on)
     await clock.advance(0)
-    expect(await bandText($)).toContain('⎇ main  ·  ✓ 已同步  ·  Issue 2 張（/gitlab）')
+    expect(await bandText($)).toContain('⎇ main  ·  ✓ 已同步  ·  Task 0 張  ·  Issue 2 張（/gitlab）')
 
     // 背景每兩分鐘輪詢一次，關掉一張就少一張
     createdByMe = [ISSUE_RAW]
@@ -693,7 +738,7 @@ describe('整合情境', () => {
     const report = await runGitlab($)
     expect(report).not.toContain('通知暫停')
     expect(report).toContain('GitLab 新動態 0 則。')
-    expect(report).toContain('讀不到還開著的 issue：GitLab 回應 HTTP 404（/issues）')
+    expect(report).toContain('讀不到還開著的 Task／Issue：GitLab 回應 HTTP 404（/issues）')
   })
 
   test('沒有 GITLAB_TOKEN、鑰匙圈也讀不到時通知暫停，band 與 /gitlab 都說明原因，git 部分照常', OPTIONS, async ($, on) => {
@@ -708,7 +753,7 @@ describe('整合情境', () => {
     const report = await runGitlab($)
     expect(report).toContain('分支 main（比對 origin/main）：↑1 待 push')
     expect(report).toContain('GitLab 通知暫停：GITLAB_TOKEN 是空的，鑰匙圈也讀不到 gitlab-token')
-    expect(report).not.toContain('還開著的 issue')
+    expect(report).not.toContain('還開著的')
     expect(toasts.filter(text => text.startsWith('GitLab 通知暫停'))).toHaveLength(1)
     expect(await bandText($)).toContain('GitLab 通知暫停（/gitlab 看原因）')
   })

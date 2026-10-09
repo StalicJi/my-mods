@@ -297,7 +297,17 @@ export function toOpenIssue(value: unknown): OpenIssue | null {
   const assignees = asArray(raw.assignees)
     .map(toUser)
     .filter((user): user is ForgeUser => user !== null)
-  return { id: item.id, ref: item.ref, projectPath: item.projectPath, title: item.title, url: item.url, author, assignees, updatedAt }
+  const kind = workItemKind(asString(raw.issue_type))
+  return { id: item.id, kind, ref: item.ref, projectPath: item.projectPath, title: item.title, url: item.url, author, assignees, updatedAt }
+}
+
+const WORK_ITEM_KINDS: Record<string, string> = { issue: 'Issue', task: 'Task', incident: 'Incident', test_case: 'Test case' }
+
+// /issues 回的是各種類型的 work item（網址都是 /-/work_items/N，看不出類型），類型要看 issue_type。
+// 沒有這個欄位的舊版 GitLab 只有 Issue；不認得的類型照原字顯示
+export function workItemKind(issueType: string | null): string {
+  if (issueType === null) return 'Issue'
+  return WORK_ITEM_KINDS[issueType] ?? issueType
 }
 
 // acme/web/web-app#5、acme/monitor!3 → 前面的專案路徑

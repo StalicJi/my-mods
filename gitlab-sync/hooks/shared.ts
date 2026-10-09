@@ -26,6 +26,8 @@ export type ForgeUser = { id: number; username: string }
 // 查詢不分專案，顯示時才依目前 repo 過濾，換目錄不必重查
 export type OpenIssue = {
   id: number
+  // 類型的顯示名稱：GitLab 的 work item 有 Task、Issue 等類型，GitHub 一律是 Issue
+  kind: string
   ref: string
   projectPath: string | null
   title: string
@@ -87,14 +89,30 @@ export function projectName(projectPath: string): string {
 
 // ── 文字 ──────────────────────────────────────────────
 
-// 0 張也照寫張數，不改說「沒有」
-export function openIssueLines(issues: readonly OpenIssue[], me: ForgeUser, now: number, project: string | null): string[] {
-  const shown = inProject(issues, project)
-  const heading = `${repoScopeLabel(project)}你開的或指派給你、還開著的 issue ${shown.length} 張`
-  if (shown.length === 0) return [`${heading}。`]
-  const lines = [`${heading}：`]
-  for (const issue of shown) {
-    lines.push(`• ${issue.ref}  ${issue.title}`, `  ${issueRole(issue, me)}，${formatAgo(now, issue.updatedAt)}更新`, `  ${issue.url}`)
+// 依類型分組：kinds 列的類型一定有、照 kinds 的順序（0 張也列），其他類型有才列、接在後面；組內維持原本的順序
+export function groupByKind(issues: readonly OpenIssue[], kinds: readonly string[]): { kind: string; issues: OpenIssue[] }[] {
+  const groups = new Map<string, OpenIssue[]>(kinds.map(kind => [kind, []]))
+  for (const issue of issues) {
+    const group = groups.get(issue.kind)
+    if (group) group.push(issue)
+    else groups.set(issue.kind, [issue])
+  }
+  return [...groups].map(([kind, grouped]) => ({ kind, issues: grouped }))
+}
+
+// 每種類型一段，0 張也照寫張數，不改說「沒有」
+export function openIssueLines(issues: readonly OpenIssue[], me: ForgeUser, now: number, project: string | null, kinds: readonly string[]): string[] {
+  const lines: string[] = []
+  for (const group of groupByKind(inProject(issues, project), kinds)) {
+    const heading = `${repoScopeLabel(project)}你開的或指派給你、還開著的 ${group.kind} ${group.issues.length} 張`
+    if (group.issues.length === 0) {
+      lines.push(`${heading}。`)
+      continue
+    }
+    lines.push(`${heading}：`)
+    for (const issue of group.issues) {
+      lines.push(`• ${issue.ref}  ${issue.title}`, `  ${issueRole(issue, me)}，${formatAgo(now, issue.updatedAt)}更新`, `  ${issue.url}`)
+    }
   }
   return lines
 }

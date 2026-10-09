@@ -261,6 +261,7 @@ export function toOpenIssue(value: unknown): OpenIssue | null {
     .filter((user): user is ForgeUser => user !== null)
   return {
     id: item.id,
+    kind: 'Issue',
     ref: `${item.repo.slice(item.repo.indexOf('/') + 1)}#${item.number}`,
     projectPath: item.repo,
     title: item.title,

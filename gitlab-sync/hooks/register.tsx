@@ -1,10 +1,10 @@
-// GitLab Sync：輸入框上方一行顯示目前分支跟遠端差幾個 commit，以及自己開的或指派給自己、還開著的 issue 張數；
+// GitLab Sync：輸入框上方一行顯示目前分支跟遠端差幾個 commit，以及自己開的或指派給自己、還開著的張數（GitLab 分 Task、Issue）；
 // GitLab 與 GitHub 上自己開的、指派給自己的 issue／MR（PR），以及要自己審查的 MR（PR）有新動態時跳 toast；
-// /gitlab、/github 立即檢查並列出該平台的未讀動態，以及那些還開著的 issue（在該平台專案的 repo 裡兩者都只算這個專案的）
+// /gitlab、/github 立即檢查並列出該平台的未讀動態，以及那些還開著的項目（在該平台專案的 repo 裡兩者都只算這個專案的）
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, HttpResponse, Register, Timer } from 'claude-code'
 
-import type { InboxStatus, RepoSync } from '../types'
+import type { InboxStatus, KindCount, RepoSync } from '../types'
 import { gitlabProjectOf, pollGitlab } from './gitlab'
 import { githubRepoOf, pollGithub } from './github'
 import {
@@ -12,6 +12,7 @@ import {
   columnsWidth,
   describeEvent,
   formatAgo,
+  groupByKind,
   inProject,
   openIssueLines,
   projectName,
@@ -48,7 +49,7 @@ const TOAST_COLUMNS = 100
 const BAND_PADDING_X = 2
 // 背景跑的 git 不能停在密碼提示，連不上就直接失敗
 const GIT_ENV = { GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' }
-const EMPTY_INBOX: InboxStatus = { unreadCount: 0, problem: null, openIssueCount: null }
+const EMPTY_INBOX: InboxStatus = { unreadCount: 0, problem: null, openCounts: null }
 
 const repoSync = atom({ plugin: 'gitlab-sync', key: 'repo' } as const, null)
 // GitLab 沿用最早的鍵名 inbox
@@ -63,8 +64,10 @@ type Forge = ForgeNames & {
   // $.store 的鍵；$.store 跨 session 共用：每個 session 都會輪詢，但同一個事件只記一次，未讀清單大家看同一份
   storeKeys: { since: string; seenIds: string; unread: string }
   // 這個 repo 在這個平台上的專案路徑；null 代表 remote 不在這個平台：
-  // 未讀動態與還開著的 issue 不分專案全部列，band 不顯示 Issue 張數
+  // 未讀動態與還開著的項目不分專案全部列，band 不顯示張數
   projectOf: (repo: RepoSync | null) => string | null
+  // 還開著的項目分哪幾種類型計數；這些類型 0 張也顯示，其他類型有才顯示
+  issueKinds: readonly string[]
   // 這台電腦沒設定這個平台（pollPlatform 回傳 null）時，斜線指令的說明
   disabledHint: string
 }
@@ -91,6 +94,8 @@ const GITLAB: Forge = {
   // 沿用最早的鍵名：升級前存下的起點與未讀清單照常使用
   storeKeys: { since: 'since', seenIds: 'seenEventIds', unread: 'unread' },
   projectOf: repo => repo?.gitlabProject ?? null,
+  // GitLab 的 work item 有 Task、Issue 等類型，別人指派過來的多半是 Task
+  issueKinds: ['Task', 'Issue'],
   disabledHint: 'GitLab：這台電腦還沒設定 GitLab 網址，不檢查 GitLab（用 /plugin configure gitlab-sync 設定 gitlabUrl）。',
 }
 
@@ -100,6 +105,7 @@ const GITHUB: Forge = {
   command: 'github',
   storeKeys: { since: 'github.since', seenIds: 'github.seenEventIds', unread: 'github.unread' },
   projectOf: repo => repo?.githubRepo ?? null,
+  issueKinds: ['Issue'],
   disabledHint: 'GitHub：這台電腦沒有登入 gh，不檢查 GitHub（在終端機執行 gh auth login 後，下一輪就會開始）。',
 }
 
@@ -338,15 +344,18 @@ async function setOpenIssues($: EngineInterface, forge: Forge, next: OpenIssuesR
   await syncCounts($, forge)
 }
 
-// band 的兩個數字（新動態則數、Issue 張數）跟斜線指令的清單用同一個 repo 過濾；
-// 未讀清單、還開著的 issue 或目前的 repo 任一個變了都要重算
+// band 的數字（新動態則數、各類型的張數）跟斜線指令的清單用同一個 repo 過濾；
+// 未讀清單、還開著的項目或目前的 repo 任一個變了都要重算
 async function syncCounts($: EngineInterface, forge: Forge) {
   const project = forge.projectOf(await read($, repoSync))
   const unreadCount = inProject(toEvents(await $.store.get(forge.storeKeys.unread)), project).length
   const openIssues = runtimeOf(forge).openIssues
-  const openIssueCount = openIssues !== null && 'issues' in openIssues ? inProject(openIssues.issues, project).length : null
+  const openCounts: KindCount[] | null =
+    openIssues !== null && 'issues' in openIssues
+      ? groupByKind(inProject(openIssues.issues, project), forge.issueKinds).map(group => ({ kind: group.kind, count: group.issues.length }))
+      : null
   const status = await readInbox($, forge)
-  if (status.unreadCount !== unreadCount || status.openIssueCount !== openIssueCount) await updateInbox($, forge, { unreadCount, openIssueCount })
+  if (status.unreadCount !== unreadCount || JSON.stringify(status.openCounts) !== JSON.stringify(openCounts)) await updateInbox($, forge, { unreadCount, openCounts })
 }
 
 // 載入器要求 read／update 直接寫出這個檔案的 atom，所以依平台分派
@@ -429,16 +438,16 @@ async function checkNow($: EngineInterface, forge: Forge): Promise<string> {
     for (const event of [...shown].reverse()) lines.push(`• ${formatAgo(now, event.at)}  ${describeEvent(event)}`, `  ${event.url}`)
     await markRead($, forge, shown)
   }
-  lines.push(...openIssuesReport(runtime, project, now))
+  lines.push(...openIssuesReport(forge, project, now))
   return lines.join('\n')
 }
 
 // 用上面強制輪詢那一輪查到的結果，不另外再查；通知暫停時（沒 token、401、連不上）是 null，上面已經說明原因
-function openIssuesReport(runtime: ForgeRuntime, project: string | null, now: number): string[] {
-  const { openIssues, me } = runtime
+function openIssuesReport(forge: Forge, project: string | null, now: number): string[] {
+  const { openIssues, me } = runtimeOf(forge)
   if (openIssues === null || me === null) return []
-  if ('error' in openIssues) return [`讀不到還開著的 issue：${openIssues.error}`]
-  return openIssueLines(openIssues.issues, me, now, project)
+  if ('error' in openIssues) return [`讀不到還開著的 ${forge.issueKinds.join('／')}：${openIssues.error}`]
+  return openIssueLines(openIssues.issues, me, now, project, forge.issueKinds)
 }
 
 // 只移除這次列出的事件：列出到寫回之間，別的 session 可能剛記下新的
@@ -478,10 +487,12 @@ export function bandSegments(repo: RepoSync | null, gitlabStatus: InboxStatus, g
     if (status.unreadCount > 0) segments.push({ text: `${forge.label} ${status.unreadCount} 則新動態（/${forge.command}）`, color: 'suggestion', isBold: true })
     else if (status.problem !== null) segments.push({ text: `${forge.label} 通知暫停（/${forge.command} 看原因）`, color: 'warning', isDim: true })
   }
-  // 放最後：這一行太長時從尾端截斷，先犧牲這個一直都在的數字，新動態留著。0 張也顯示，還沒查到時才不顯示。
-  // 只在該平台的專案裡顯示：在別的平台、本機或不在 repo 的目錄，這個數字是全部專案加總，容易誤會成這個 repo 的
+  // 放最後：這一行太長時從尾端截斷，先犧牲這些一直都在的數字，新動態留著。0 張也顯示，還沒查到時才不顯示。
+  // 只在該平台的專案裡顯示：在別的平台、本機或不在 repo 的目錄，這些數字是全部專案加總，容易誤會成這個 repo 的
   for (const { forge, status } of statuses) {
-    if (forge.projectOf(repo) !== null && status.openIssueCount !== null) segments.push(openIssueSegment(status.openIssueCount, forge.command))
+    // 熱重載後 $.state 可能還是舊版存的形狀（沒有 openCounts），下一次重算前先當成還沒查到
+    const counts = status.openCounts ?? null
+    if (forge.projectOf(repo) !== null && counts !== null) segments.push(...openCountSegments(counts, forge.command))
   }
   return segments
 }
@@ -495,14 +506,18 @@ export function remoteSegment(repo: RepoSync): Segment {
   return { text: repo.remoteHost, isDim: true }
 }
 
+// 每種類型一段，例如「Task 2 張  ·  Issue 0 張（/gitlab）」，指令提示只接在最後一段。
 // 只有數字上色：0 張綠色，有張數紅色，其餘字暗色
-function openIssueSegment(count: number, command: string): Segment {
-  const spans: Span[] = [
-    { text: 'Issue ', isDim: true },
-    { text: String(count), color: count === 0 ? 'success' : 'error', isBold: true },
-    { text: ` 張（/${command}）`, isDim: true },
-  ]
-  return { text: spans.map(span => span.text).join(''), spans }
+function openCountSegments(counts: readonly KindCount[], command: string): Segment[] {
+  return counts.map(({ kind, count }, index) => {
+    const hint = index === counts.length - 1 ? `（/${command}）` : ''
+    const spans: Span[] = [
+      { text: `${kind} `, isDim: true },
+      { text: String(count), color: count === 0 ? 'success' : 'error', isBold: true },
+      { text: ` 張${hint}`, isDim: true },
+    ]
+    return { text: spans.map(span => span.text).join(''), spans }
+  })
 }
 
 function syncSegment(repo: RepoSync): Segment | null {
@@ -550,17 +565,18 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    // 名稱已被佔用時會被拒絕，不影響其他功能
+    // 名稱已被佔用時會被拒絕，不影響其他功能。
+    // 說明是選單上的一行字，太長會被截斷，細節（標為已讀、只列這個 repo 的）由指令輸出自己講
     await $.command
       .register({
         name: 'gitlab',
-        description: '立即檢查分支與 GitLab，列出 issue／MR 的未讀動態並標為已讀，以及自己開的或指派給自己、還開著的 issue（在 repo 裡都只列這個專案的）',
+        description: '檢查分支與 GitLab，列出未讀動態和還開著的 Task、Issue',
       })
       .catch(() => {})
     await $.command
       .register({
         name: 'github',
-        description: '立即檢查分支與 GitHub，列出 issue／PR 的未讀動態並標為已讀，以及自己開的或指派給自己、還開著的 issue（在 repo 裡都只列這個專案的）',
+        description: '檢查分支與 GitHub，列出未讀動態和還開著的 Issue',
       })
       .catch(() => {})
     startTicking($)

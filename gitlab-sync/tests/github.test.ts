@@ -13,7 +13,7 @@ const ME = { id: 112, login: 'alice' }
 const OCTO = { id: 583, login: 'octocat' }
 const ME_USER = { id: ME.id, username: ME.login }
 const REPO_URL = 'https://api.github.com/repos/alice/notes-app'
-const NO_INBOX: InboxStatus = { unreadCount: 0, problem: null, openIssueCount: null }
+const NO_INBOX: InboxStatus = { unreadCount: 0, problem: null, openCounts: null }
 const BAND_PROPS = { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 200 }
 
 const issueRaw = (number: number, title: string, user: typeof ME, assignees: (typeof ME)[] = [], extra: Record<string, unknown> = {}) => ({
@@ -124,7 +124,7 @@ describe('band', () => {
   const texts = (repo: RepoSync, gitlab: InboxStatus, github: InboxStatus) => bandSegments(repo, gitlab, github).map(segment => segment.text)
 
   test('在 GitHub repo 裡顯示 GitHub 的新動態與 Issue 張數；GitLab 的張數不顯示', () => {
-    expect(texts(GITHUB_REPO, { ...NO_INBOX, openIssueCount: 9 }, { unreadCount: 1, problem: null, openIssueCount: 2 })).toEqual([
+    expect(texts(GITHUB_REPO, { ...NO_INBOX, openCounts: [{ kind: 'Task', count: 4 }, { kind: 'Issue', count: 9 }] }, { unreadCount: 1, problem: null, openCounts: [{ kind: 'Issue', count: 2 }] })).toEqual([
       'GitHub',
       '⎇ main',
       '✓ 已同步',
@@ -134,12 +134,13 @@ describe('band', () => {
     expect(texts(GITHUB_REPO, NO_INBOX, { ...NO_INBOX, problem: 'HTTP 401' })).toEqual(['GitHub', '⎇ main', '✓ 已同步', 'GitHub 通知暫停（/github 看原因）'])
   })
 
-  test('在 GitLab repo 裡 GitHub 的新動態照樣顯示，Issue 張數只顯示 GitLab 的', () => {
-    expect(texts(GITLAB_REPO, { ...NO_INBOX, openIssueCount: 0 }, { ...NO_INBOX, unreadCount: 2, openIssueCount: 5 })).toEqual([
+  test('在 GitLab repo 裡 GitHub 的新動態照樣顯示，張數只顯示 GitLab 的（Task、Issue 分開）', () => {
+    expect(texts(GITLAB_REPO, { ...NO_INBOX, openCounts: [{ kind: 'Task', count: 0 }, { kind: 'Issue', count: 0 }] }, { ...NO_INBOX, unreadCount: 2, openCounts: [{ kind: 'Issue', count: 5 }] })).toEqual([
       'GitLab',
       '⎇ main',
       '✓ 已同步',
       'GitHub 2 則新動態（/github）',
+      'Task 0 張',
       'Issue 0 張（/gitlab）',
     ])
   })
@@ -265,7 +266,7 @@ describe('整合情境', () => {
     expect(report).toContain('這個 repo（notes-app）裡 GitHub 新動態 1 則（已標為已讀）：')
     expect(report).toContain('octocat 在 notes-app#3 留言：我這邊也重現了')
     expect(report).toContain('https://github.com/alice/notes-app/issues/3#issuecomment-7001')
-    expect(report).toContain('這個 repo（notes-app）裡你開的或指派給你、還開著的 issue 1 張：\n• notes-app#3  報表數字對不上\n  你開的，還沒指派')
+    expect(report).toContain('這個 repo（notes-app）裡你開的或指派給你、還開著的 Issue 1 張：\n• notes-app#3  報表數字對不上\n  你開的，還沒指派')
     expect(await bandText($)).not.toContain('則新動態')
     expect(await runGithub($)).toContain('這個 repo（notes-app）裡 GitHub 新動態 0 則。')
 
@@ -317,7 +318,7 @@ describe('整合情境', () => {
     expect(report).toContain('octocat 請你審查 notes-app#6：feat: 加上快取')
     expect(report).toContain('octocat 在 notes-app#6 留言：麻煩看一下快取策略')
     // 別人開、指派給我的 issue 也算進還開著的張數
-    expect(report).toContain('還開著的 issue 1 張：\n• notes-app#4  分頁算錯\n  octocat 開的，指派給你')
+    expect(report).toContain('還開著的 Issue 1 張：\n• notes-app#4  分頁算錯\n  octocat 開的，指派給你')
     expect(requests.some(request => decodeURIComponent(request.url).includes('q=is:pr review-requested:@me updated:>=2026-10-08T02:58:00Z'))).toBe(true)
     const timelineUrls = requests.filter(request => request.url.includes('/issues/6/timeline')).map(request => new URL(request.url).searchParams.get('page'))
     // 啟動時一輪、/github 強制一輪：每輪都讀第一頁，再讀最後兩頁
