@@ -57,9 +57,24 @@ export async function syncTimer($: EngineInterface): Promise<void> {
       stopTimer()
       return
     }
-    if (timer === undefined) timer = $.clock.every(ANIMATION_MS, () => void update($, tickAtom, frame => frame + 1).catch(() => {}))
+    if (timer === undefined) timer = $.clock.every(ANIMATION_MS, () => void advanceFrame($))
   } catch {
     // 略過：下一次寫入時再同步
+  }
+}
+
+// 每一拍先確認面板還在畫面上：使用者按 ✕ 或用其他方式關掉面板時，計時器自己發現並停下，
+// 不必等到下一次派出或完成，也不依賴 ui.close 事件
+async function advanceFrame($: EngineInterface) {
+  try {
+    const panes = await $.ui.panes()
+    if (!panes.some(pane => pane.id === PANE_ID && pane.isPlaced)) {
+      stopTimer()
+      return
+    }
+    await update($, tickAtom, frame => frame + 1)
+  } catch {
+    // 略過這一拍
   }
 }
 

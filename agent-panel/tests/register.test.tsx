@@ -90,11 +90,17 @@ test('被擋下、沒有 agentId、teammate 不加入', async ($, on) => {
   expect(control.opens).toHaveLength(0)
 })
 
-test('使用者手動關掉後同一回合再派，不再自動跳出', async ($, on) => {
+test('使用者按 ✕ 關掉面板：計時器停止，同一回合再派也不重開', async ($, on) => {
   const control = engine(on)
   await start($)
   await spawnAgent($)
-  // 使用者按 ✕ 關掉面板：不經過 mod，mod 也不會因此重開
+  await control.clock.advance(400)
+  expect(control.state.get('tick')).toBeGreaterThan(0)
+  // 使用者按 ✕：host 把窗格關掉、從清單移除（測試工具無法觸發 ui.close，直接模擬 host 的狀態）
+  control.panes = []
+  const stopped = control.state.get('tick')
+  await control.clock.advance(600)
+  expect(control.state.get('tick')).toBe(stopped)
   await spawnAgent($)
   expect(control.opens).toHaveLength(1)
 })
