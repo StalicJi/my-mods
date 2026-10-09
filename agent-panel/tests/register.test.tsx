@@ -182,6 +182,8 @@ test('你送出訊息時關閉面板，/ 開頭、背景通知與外掛送的不
   const control = engine(on)
   await start($)
   await spawnAgent($)
+  // 先讓子代理完成：還在跑時送訊息不關面板（另一個測試涵蓋）
+  await $.turn.complete({ reason: 'answer', answer: '好了', durationMs: 1, agentId: 'a1', turnId: 'x' } as any)
   await submit($, '繼續', 'composer')
   expect(control.closes).toHaveLength(1)
   expect(control.closes[0]).toMatchObject({ id: 'agent-panel' })
@@ -189,6 +191,18 @@ test('你送出訊息時關閉面板，/ 開頭、背景通知與外掛送的不
   await submit($, '背景任務完成', 'task-notification')
   await submit($, '外掛送的', 'plugin')
   expect(control.closes).toHaveLength(1)
+})
+
+test('子代理還在跑時你送出訊息不關面板，全部完成後下一則才關', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  await submit($, '順便看一下測試', 'composer')
+  expect(control.closes).toHaveLength(0)
+  await $.turn.complete({ reason: 'answer', answer: '好了', durationMs: 1, agentId: 'a1', turnId: 'x' } as any)
+  await submit($, '繼續', 'composer')
+  expect(control.closes).toHaveLength(1)
+  expect(control.closes[0]).toMatchObject({ id: 'agent-panel' })
 })
 
 test('/agents 開著就關、關著就開', async ($, on) => {

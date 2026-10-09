@@ -198,7 +198,12 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
-    if (isOwnMessage(e.origin.kind, e.text)) await closePanel($)
+    if (isOwnMessage(e.origin.kind, e.text)) {
+      // 這一批還有子代理在跑時不關：主管模式下常會邊等子代理邊補指令，面板要留著看進度；全部完成後的下一則訊息才關。
+      // 讀不到批次時照舊關閉，不擋住使用者送出的訊息
+      const batch = await read($, batchAtom).catch(() => null)
+      if (!hasRunning(batch)) await closePanel($)
+    }
     return next(e)
   })
 
