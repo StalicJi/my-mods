@@ -64,7 +64,7 @@ type Forge = ForgeNames & {
   // $.store 的鍵；$.store 跨 session 共用：每個 session 都會輪詢，但同一個事件只記一次，未讀清單大家看同一份
   storeKeys: { since: string; seenIds: string; unread: string }
   // 這個 repo 在這個平台上的專案路徑；null 代表 remote 不在這個平台：
-  // 未讀動態與還開著的項目不分專案全部列，band 不顯示張數
+  // 未讀動態與還開著的項目不分專案全部列，band 不顯示張數；remote 在另一個平台時，band 也不顯示這個平台的新動態與通知暫停
   projectOf: (repo: RepoSync | null) => string | null
   // 還開著的項目分哪幾種類型計數；這些類型 0 張也顯示，其他類型有才顯示
   issueKinds: readonly string[]
@@ -483,7 +483,11 @@ export function bandSegments(repo: RepoSync | null, gitlabStatus: InboxStatus, g
     { forge: GITLAB, status: gitlabStatus },
     { forge: GITHUB, status: githubStatus },
   ]
+  // 在某個平台的 repo 裡只顯示那個平台的新動態與通知暫停（例如在 GitHub repo 不顯示「GitLab 通知暫停」），
+  // 另一個平台的新動態照樣跳 toast；不在 repo、本機或其他主機時沒有所屬平台，兩個平台都顯示
+  const homeForge = FORGES.find(forge => forge.projectOf(repo) !== null)
   for (const { forge, status } of statuses) {
+    if (homeForge !== undefined && forge !== homeForge) continue
     if (status.unreadCount > 0) segments.push({ text: `${forge.label} ${status.unreadCount} 則新動態（/${forge.command}）`, color: 'suggestion', isBold: true })
     else if (status.problem !== null) segments.push({ text: `${forge.label} 通知暫停（/${forge.command} 看原因）`, color: 'warning', isDim: true })
   }

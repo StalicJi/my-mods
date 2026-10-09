@@ -209,16 +209,21 @@ describe('文字與畫面', () => {
     expect(texts(SYNCED, legacy)).toEqual(['GitLab', '⎇ develop', '✓ 已同步'])
   })
 
-  test('band 最前面標示來源：設定的 GitLab、GitHub、本機或主機名稱；不在設定的 GitLab 專案時不顯示張數，新動態照常', () => {
+  test('band 最前面標示來源：設定的 GitLab、GitHub、本機或主機名稱；不在設定的 GitLab 專案時不顯示張數；GitHub repo 裡不顯示 GitLab 的新動態與通知暫停，本機與其他主機照常', () => {
     const texts = (repo: RepoSync | null, inbox: InboxStatus) => bandSegments(repo, inbox).map(segment => segment.text)
-    const github: RepoSync = { ...SYNCED, remoteHost: 'github.com', gitlabProject: null }
+    const github: RepoSync = { ...SYNCED, remoteHost: 'github.com', gitlabProject: null, githubRepo: 'alice/notes-app' }
     const local: RepoSync = { ...SYNCED, upstream: null, remoteHost: null, gitlabProject: null }
     const bitbucket: RepoSync = { ...SYNCED, remoteHost: 'bitbucket.org', gitlabProject: null }
     expect(remoteSegment(SYNCED).text).toBe('GitLab')
     expect(texts(github, { ...NO_INBOX, openCounts: counts(1, 3) })).toEqual(['GitHub', '⎇ develop', '✓ 已同步'])
     expect(texts(local, { ...NO_INBOX, openCounts: counts(1, 3) })).toEqual(['本機', '⎇ develop', '沒有遠端分支（還沒 push？）'])
     expect(texts(bitbucket, { ...NO_INBOX, openCounts: counts(1, 3) })).toEqual(['bitbucket.org', '⎇ develop', '✓ 已同步'])
-    expect(texts(github, { ...NO_INBOX, unreadCount: 2, openCounts: counts(1, 3) })).toEqual(['GitHub', '⎇ develop', '✓ 已同步', 'GitLab 2 則新動態（/gitlab）'])
+    // 在 GitHub repo 裡 GitLab 的新動態與通知暫停都不顯示（新動態照樣跳 toast）
+    expect(texts(github, { ...NO_INBOX, unreadCount: 2, openCounts: counts(1, 3) })).toEqual(['GitHub', '⎇ develop', '✓ 已同步'])
+    expect(texts(github, { ...NO_INBOX, problem: '連不上' })).toEqual(['GitHub', '⎇ develop', '✓ 已同步'])
+    // 本機與其他主機沒有所屬平台，GitLab 的新動態與通知暫停照常顯示
+    expect(texts(local, { ...NO_INBOX, unreadCount: 2 })).toEqual(['本機', '⎇ develop', '沒有遠端分支（還沒 push？）', 'GitLab 2 則新動態（/gitlab）'])
+    expect(texts(bitbucket, { ...NO_INBOX, problem: '連不上' })).toEqual(['bitbucket.org', '⎇ develop', '✓ 已同步', 'GitLab 通知暫停（/gitlab 看原因）'])
     // 不在 repo 的目錄也一樣：張數是全部專案加總，不顯示
     expect(texts(null, { ...NO_INBOX, openCounts: counts(1, 3) })).toEqual([])
   })

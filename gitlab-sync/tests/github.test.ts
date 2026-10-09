@@ -121,9 +121,9 @@ describe('判斷哪些 timeline 事件要通知', () => {
 describe('band', () => {
   const GITHUB_REPO: RepoSync = { branch: 'main', isDetached: false, upstream: 'origin/main', ahead: 0, behind: 0, dirtyCount: 0, isFetchFailed: false, remoteHost: 'github.com', gitlabProject: null, githubRepo: 'alice/notes-app' }
   const GITLAB_REPO: RepoSync = { ...GITHUB_REPO, remoteHost: 'gitlab.example.com', gitlabProject: 'acme/handbook', githubRepo: null }
-  const texts = (repo: RepoSync, gitlab: InboxStatus, github: InboxStatus) => bandSegments(repo, gitlab, github).map(segment => segment.text)
+  const texts = (repo: RepoSync | null, gitlab: InboxStatus, github: InboxStatus) => bandSegments(repo, gitlab, github).map(segment => segment.text)
 
-  test('在 GitHub repo 裡顯示 GitHub 的新動態與 Issue 張數；GitLab 的張數不顯示', () => {
+  test('在 GitHub repo 裡只顯示 GitHub 的新動態、通知暫停與 Issue 張數；GitLab 的都不顯示', () => {
     expect(texts(GITHUB_REPO, { ...NO_INBOX, openCounts: [{ kind: 'Task', count: 4 }, { kind: 'Issue', count: 9 }] }, { unreadCount: 1, problem: null, openCounts: [{ kind: 'Issue', count: 2 }] })).toEqual([
       'GitHub',
       '⎇ main',
@@ -132,17 +132,24 @@ describe('band', () => {
       'Issue 2 張（/github）',
     ])
     expect(texts(GITHUB_REPO, NO_INBOX, { ...NO_INBOX, problem: 'HTTP 401' })).toEqual(['GitHub', '⎇ main', '✓ 已同步', 'GitHub 通知暫停（/github 看原因）'])
+    // 截圖的情境：不在公司內網連不到 GitLab，GitHub repo 的 band 不該出現「GitLab 通知暫停」
+    expect(texts(GITHUB_REPO, { ...NO_INBOX, problem: '連不上' }, { ...NO_INBOX, openCounts: [{ kind: 'Issue', count: 0 }] })).toEqual(['GitHub', '⎇ main', '✓ 已同步', 'Issue 0 張（/github）'])
+    expect(texts(GITHUB_REPO, { ...NO_INBOX, unreadCount: 3 }, NO_INBOX)).toEqual(['GitHub', '⎇ main', '✓ 已同步'])
   })
 
-  test('在 GitLab repo 裡 GitHub 的新動態照樣顯示，張數只顯示 GitLab 的（Task、Issue 分開）', () => {
+  test('在 GitLab repo 裡只顯示 GitLab 的新動態、通知暫停與張數（Task、Issue 分開）；GitHub 的都不顯示', () => {
     expect(texts(GITLAB_REPO, { ...NO_INBOX, openCounts: [{ kind: 'Task', count: 0 }, { kind: 'Issue', count: 0 }] }, { ...NO_INBOX, unreadCount: 2, openCounts: [{ kind: 'Issue', count: 5 }] })).toEqual([
       'GitLab',
       '⎇ main',
       '✓ 已同步',
-      'GitHub 2 則新動態（/github）',
       'Task 0 張',
       'Issue 0 張（/gitlab）',
     ])
+    expect(texts(GITLAB_REPO, { ...NO_INBOX, unreadCount: 1 }, { ...NO_INBOX, problem: 'HTTP 401' })).toEqual(['GitLab', '⎇ main', '✓ 已同步', 'GitLab 1 則新動態（/gitlab）'])
+  })
+
+  test('不在 repo 的目錄沒有所屬平台：兩個平台的新動態與通知暫停都顯示', () => {
+    expect(texts(null, { ...NO_INBOX, problem: '連不上' }, { ...NO_INBOX, unreadCount: 2 })).toEqual(['GitLab 通知暫停（/gitlab 看原因）', 'GitHub 2 則新動態（/github）'])
   })
 })
 
