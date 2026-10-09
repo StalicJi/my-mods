@@ -19,7 +19,7 @@ import {
   statusLine,
   statusText,
 } from './layout'
-import type { Span } from './layout'
+import type { MascotKind, MascotPicture, Span } from './layout'
 
 const PANE_ID = 'agent-panel'
 const PANE_TITLE = 'Agents'
@@ -38,7 +38,7 @@ const batchAtom = atom({ plugin: 'agent-panel', key: 'batch' } as const, null as
 // 動畫計數器，只有面板讀，所以動畫只會讓面板重畫；不用 $.ui.invalidate，那會讓整個對話紀錄重跑
 const tickAtom = atom({ plugin: 'agent-panel', key: 'tick' } as const, 0)
 
-// 下面四個是模組自己的變數，熱重載後重來
+// 下面五個是模組自己的變數，熱重載後重來
 // 目前主回合的 turnId；歸零時沿用現有批次
 let currentTurnId: string | null = null
 // 窗格放不下的提示每個 session 最多一次
@@ -46,6 +46,8 @@ let hasWarnedNarrow = false
 let timer: Timer | undefined
 // 上一次送給 $.ui.status 的文字；相同就不再送，每送一次輸入框下方就重畫一次
 let shownStatus: string | undefined | typeof STATUS_UNKNOWN = STATUS_UNKNOWN
+// 有沒有設 CLAUDE_CODE_FORCE_TERMINAL_IMAGES：session.start 讀一次（熱重載也會重跑），不在每次重畫時讀；還沒讀到之前當成沒設
+let forcesTerminalImages = false
 
 type SpawnFacts = { id: string; description: string; agentType: string; agentName: string | null; isNested: boolean }
 type FinishReason = 'answer' | 'aborted' | 'error' | 'refusal'
@@ -223,6 +225,17 @@ async function recordFinish($: EngineInterface, agentId: string, reason: FinishR
   }
 }
 
+// 小人畫圖片版要終端機開了圖片，但 mod 問不到終端機最後有沒有開：Claude Code 認不出 cmux，背景 session 也預設不開，
+// 使用者只在 cmux 裡設這個變數強制開啟，所以跟著它走。跟 Claude Code 的判斷一致，非空就算開；讀不到當成沒設
+async function readForcesTerminalImages($: EngineInterface): Promise<boolean> {
+  try {
+    const value = await $.env.get('CLAUDE_CODE_FORCE_TERMINAL_IMAGES')
+    return value !== undefined && value !== ''
+  } catch {
+    return false
+  }
+}
+
 // 熱重載或面板開啟前就在跑的子代理：從 $.agent.list() 補上
 async function seedFromAgentList($: EngineInterface) {
   try {
@@ -237,6 +250,7 @@ async function seedFromAgentList($: EngineInterface) {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    forcesTerminalImages = await readForcesTerminalImages($)
     // 名稱已被佔用時會被拒絕，不影響其他功能
     await $.command.register({ name: 'agents', description: '開關子代理面板' }).catch(() => {})
     await seedFromAgentList($)
@@ -320,8 +334,11 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
     const elements = $.ui.resolve(e)
     const { Box, Text } = elements
-    // Raster 只有終端機畫得出來：其他介面的 resolve 照樣給，但畫成空的 fragment，所以看 surface，不畫小人、寬度留給文字
+    // Raster、Image 只有終端機畫得出來：其他介面的 resolve 照樣給，但畫成空的 fragment，所以看 surface，不畫小人、寬度留給文字
     const Raster = e.surface === 'terminal' && 'Raster' in elements ? elements.Raster : undefined
+    const Image = e.surface === 'terminal' && 'Image' in elements ? elements.Image : undefined
+    // 開了圖片就畫細像素的圖片版，不然畫方塊版
+    const mascotKind: MascotKind | null = forcesTerminalImages && Image !== undefined ? 'image' : Raster !== undefined ? 'raster' : null
     // 一列畫成一個 Text，各段顏色是裡面的 Text；放不下就截斷，折行會讓列數跟 fullRowCount 對不上
     const spanRow = (spans: Span[]) => (
       <Text wrap="truncate-end">
@@ -349,25 +366,31 @@ export const register: Register = on => {
       const now = await $.clock.now()
       const options = { columns, now, frame }
       const { running, failed, done } = splitSections(batch)
-      // 小人只畫在完整模式（精簡模式不用 cardView），而且面板要夠寬、拿得到 Raster；不畫時卡片照舊用整個寬度
-      const { withMascot, textColumns } = mascotLayout(columns)
-      const MascotRaster = withMascot ? Raster : undefined
-      // 畫小人時卡片之間可能多空幾列，算列數要照實際會不會畫
-      const fullModeOptions = { withMascot: MascotRaster !== undefined }
+      // 小人只畫在完整模式（精簡模式不用 cardView），而且面板要夠寬、拿得到 Image 或 Raster；不畫時卡片照舊用整個寬度。
+      // 畫小人時卡片之間可能多空幾列，fullRowCount 與 groupEntries 都照實際畫的小人種類算
+      const layout = mascotLayout(columns, mascotKind)
       // 放在輸入框上方時會擠掉對話的空間；完整模式要捲動才看得完時，也改成一個子代理一列
-      const isCompact = e.props.placement === 'inline' || fullRowCount(batch, fullModeOptions) > e.props.scroll.bodyRows
-      const cardOptions = { ...options, columns: MascotRaster === undefined ? columns : textColumns }
+      const isCompact = e.props.placement === 'inline' || fullRowCount(batch, layout) > e.props.scroll.bodyRows
+      const cardOptions = { ...options, columns: layout.textColumns }
       const cardRows = (agent: AgentRow) => {
         const card = agentCard(agent, cardOptions)
         return [...card.lines.map(spanRow), ...(card.bar.length > 0 ? [barRow(card.bar)] : [])]
       }
+      // 種類是照拿得到的元件選的，這裡判斷 undefined 只為了讓型別收窄
+      const mascotView = (agentId: string, mascot: MascotPicture) => {
+        const key = `mascot-${agentId}`
+        if (mascot.kind === 'image') {
+          return Image && <Image key={key} source={mascot.source} columns={mascot.columns} rows={mascot.rows} alt=" " />
+        }
+        return Raster && <Raster key={key} columns={mascot.columns} rows={mascot.rows} cells={mascot.cells} />
+      }
       // 小人在左、隔一欄接卡片；小人不比卡片高（見 agentMascot），畫面列數仍跟 fullRowCount 一致
       const cardView = (agent: AgentRow) => {
-        if (MascotRaster === undefined) return cardRows(agent)
-        const mascot = agentMascot(agent, { now, frame })
+        if (layout.mascot === null) return cardRows(agent)
+        const mascot = agentMascot(agent, { now, frame, kind: layout.mascot })
         return [
           <Box flexDirection="row" columnGap={MASCOT_GAP}>
-            <MascotRaster key={`mascot-${agent.id}`} columns={mascot.columns} rows={mascot.rows} cells={mascot.cells} />
+            {mascotView(agent.id, mascot)}
             <Box flexDirection="column">{cardRows(agent)}</Box>
           </Box>,
         ]
@@ -387,7 +410,7 @@ export const register: Register = on => {
             ...(index > 0 ? [blankRow()] : []),
             <Text dimColor>{group.label}</Text>,
             // 同組卡片之間要不要空一列（小人跟卡片一樣高時）由 groupEntries 決定，fullRowCount 也照它算
-            ...groupEntries(group.agents, fullModeOptions).flatMap(entry => (entry.kind === 'blank' ? [blankRow()] : cardView(entry.agent))),
+            ...groupEntries(group.agents, layout).flatMap(entry => (entry.kind === 'blank' ? [blankRow()] : cardView(entry.agent))),
           ])
 
       return (

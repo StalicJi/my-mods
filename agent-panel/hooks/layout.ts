@@ -5,6 +5,8 @@ import type { AgentRow, Batch } from '../types'
 import { agentLook, agentTokens, batchTotals } from './batch'
 import { MASCOT_COLUMNS, mascotRaster } from './mascot'
 import type { MascotSize, MascotState } from './mascot'
+import { MASCOT_IMAGE_COLUMNS, MASCOT_IMAGE_ROWS, mascotImage } from './mascot-image'
+import type { MascotImage } from './mascot-image'
 import { contextPercent, modelInfo } from './pricing'
 import type { ModelFamily } from './pricing'
 
@@ -13,8 +15,14 @@ export type Span = { text: string; color?: string; isDim?: boolean; isBold?: boo
 // lines 是進度條以外的每一列；bar 是進度條每一格的顏色，完成與失敗的卡片沒有進度條（空陣列）
 export type Card = { lines: Span[][]; bar: string[] }
 
-// 完整模式的卡片左邊會不會畫小人
-export type FullModeOptions = { withMascot: boolean }
+// 卡片左邊的小人畫哪一種：image 是交給 Image 的細像素圖（終端機要開圖片），raster 是交給 Raster 的方塊字元
+export type MascotKind = 'image' | 'raster'
+// 完整模式的卡片左邊畫哪一種小人，null 是不畫
+export type FullModeOptions = { mascot: MascotKind | null }
+// 一隻小人要畫的東西，依種類交給 Image 或 Raster
+export type MascotPicture =
+  | { kind: 'image'; source: MascotImage; columns: number; rows: number }
+  | { kind: 'raster'; cells: string; columns: number; rows: number }
 export type GroupEntry = { kind: 'card'; agent: AgentRow } | { kind: 'blank' }
 
 type AgentStatus = AgentRow['status']
@@ -48,8 +56,9 @@ const STATUS_COUNTS: { status: AgentStatus; mark: string; color: string }[] = [
 ]
 // 每張卡片在完整模式佔幾列（執行中含進度條）；要跟 agentCard 畫出來的一致
 const CARD_ROWS: Record<AgentStatus, number> = { running: 5, failed: 3, done: 2 }
-// 小人的列數只看大小，跟造型、狀態、動畫拍數無關，各畫一次量出來
-const MASCOT_ROWS: Record<MascotSize, number> = {
+const MASCOT_COLUMNS_OF: Record<MascotKind, number> = { image: MASCOT_IMAGE_COLUMNS, raster: MASCOT_COLUMNS }
+// 方塊版小人的列數只看大小，跟造型、狀態、動畫拍數無關，各畫一次量出來；圖片版不分大小，都是 MASCOT_IMAGE_ROWS
+const RASTER_MASCOT_ROWS: Record<MascotSize, number> = {
   large: mascotRaster({ look: 0, size: 'large', state: 'running', frame: 0 }).rows,
   small: mascotRaster({ look: 0, size: 'small', state: 'done', frame: 0 }).rows,
 }
@@ -108,7 +117,7 @@ export function splitSections(batch: Batch): { running: AgentRow[]; failed: Agen
 }
 
 // 完整模式要幾列：狀態列，加上每個非空的組（組標題＋卡片與卡片間的空列，見 groupEntries），組與組之間空一列。
-// register.tsx 拿它跟面板可用列數比，放不下就改用 compactLine 一個子代理一列；withMascot 要跟實際會不會畫小人一致
+// register.tsx 拿它跟面板可用列數比，放不下就改用 compactLine 一個子代理一列；mascot 要跟實際畫的小人一致
 export function fullRowCount(batch: Batch, options: FullModeOptions): number {
   const groups = Object.values(splitSections(batch)).filter(group => group.length > 0)
   const entryRows = groups
@@ -118,13 +127,14 @@ export function fullRowCount(batch: Batch, options: FullModeOptions): number {
 }
 
 // 一組裡依序要畫的東西：卡片，或卡片之間的一列空白。
-// 畫小人時，卡片不比小人高（目前是 2 列的完成卡片配 2 列的小小人），小人就佔滿卡片的上下緣，
+// 畫小人時，卡片不比小人高（目前是 2 列的完成卡片配 2 列的小人：方塊版的小小人、圖片版的小人），小人就佔滿卡片的上下緣，
 // 同組下一張卡片的小人會直接接上來，看起來像一隻很高的小人，所以兩張之間空一列；比小人高的卡片底下本來就有空隙。
 // 組的第一張之前、最後一張之後不加：那裡已經是組名、組間空行或面板底部
 export function groupEntries(agents: readonly AgentRow[], options: FullModeOptions): GroupEntry[] {
+  const { mascot } = options
   return agents.flatMap((agent, index): GroupEntry[] => {
     const hasNext = index < agents.length - 1
-    const mascotFillsCard = options.withMascot && CARD_ROWS[agent.status] <= MASCOT_ROWS[mascotSize(agent)]
+    const mascotFillsCard = mascot !== null && CARD_ROWS[agent.status] <= mascotRows(agent, mascot)
     return [{ kind: 'card', agent }, ...(hasNext && mascotFillsCard ? [{ kind: 'blank' } as const] : [])]
   })
 }
@@ -161,20 +171,28 @@ function runningCard(row: AgentRow, options: LineOptions, title: Span[]): Card {
   }
 }
 
-// 完整模式的卡片要不要在左邊畫小人，以及卡片文字剩多寬
-export function mascotLayout(bodyColumns: number): { withMascot: boolean; textColumns: number } {
-  const textColumns = bodyColumns - MASCOT_COLUMNS - MASCOT_GAP
-  return textColumns >= MIN_TEXT_COLUMNS_WITH_MASCOT ? { withMascot: true, textColumns } : { withMascot: false, textColumns: bodyColumns }
+// 完整模式的卡片左邊要畫哪一種小人（kind 是畫得出來的那種，null 是拿不到），以及卡片文字剩多寬；
+// 回傳值可以直接當 fullRowCount、groupEntries 的 options
+export function mascotLayout(bodyColumns: number, kind: MascotKind | null): FullModeOptions & { textColumns: number } {
+  if (kind === null) return { mascot: null, textColumns: bodyColumns }
+  const textColumns = bodyColumns - MASCOT_COLUMNS_OF[kind] - MASCOT_GAP
+  return textColumns >= MIN_TEXT_COLUMNS_WITH_MASCOT ? { mascot: kind, textColumns } : { mascot: null, textColumns: bodyColumns }
 }
 
-// 執行中的卡片 5 列畫 4 列高的大小人；完成 2 列、失敗 3 列只放得下 2 列高的小小人，小人才不會把卡片撐高
-export function agentMascot(row: AgentRow, options: { now: number; frame: number }): { columns: number; rows: number; cells: string } {
-  return mascotRaster({
-    look: agentLook(row),
-    size: mascotSize(row),
-    state: mascotState(row, options.now),
-    frame: options.frame,
-  })
+// 方塊版：執行中的卡片 5 列畫 4 列高的大小人；完成 2 列、失敗 3 列只放得下 2 列高的小小人，小人才不會把卡片撐高。
+// 圖片版各狀態都是 4 欄 × 2 列，像素夠細，不用分大小
+export function agentMascot(row: AgentRow, options: { now: number; frame: number; kind: MascotKind }): MascotPicture {
+  const look = agentLook(row)
+  const state = mascotState(row, options.now)
+  const { frame } = options
+  if (options.kind === 'image') {
+    return { kind: 'image', source: mascotImage({ look, state, frame }), columns: MASCOT_IMAGE_COLUMNS, rows: MASCOT_IMAGE_ROWS }
+  }
+  return { kind: 'raster', ...mascotRaster({ look, size: mascotSize(row), state, frame }) }
+}
+
+function mascotRows(row: AgentRow, kind: MascotKind): number {
+  return kind === 'image' ? MASCOT_IMAGE_ROWS : RASTER_MASCOT_ROWS[mascotSize(row)]
 }
 
 function mascotSize(row: AgentRow): MascotSize {

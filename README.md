@@ -8,7 +8,7 @@
 | `where-am-i` | 輸入框上方的進度摘要（繁體中文版，fork 自 [hamzafer/claude-code-mods](https://github.com/hamzafer)，MIT） |
 | `next-steps` | 回合結束後建議下一步（繁體中文版，fork 自 anthropics/claude-plugins-community，Apache 2.0） |
 | `gitlab-sync` | 分支跟遠端的同步狀態與還開著的張數（GitLab 的 Task、Issue 分開計數）；GitLab 與 GitHub 上自己的 issue／MR（PR）有新動態時通知，`/gitlab`、`/github` 查看 |
-| `agent-panel` | 派出子代理時跳出面板（右側或輸入框上方），一眼看出每個子代理在做什麼、有沒有卡住或失敗：類型或名稱、模型、正在做什麼、token 與時間，卡住時轉黃；卡片左邊有像素小人，依派出順序換配件，執行中會走路，卡住變黃、完成閉眼、失敗變灰；子代理多或放在輸入框上方時一個一列，面板放不下時輸入框下方顯示一行狀態；`/agents` 開關 |
+| `agent-panel` | 派出子代理時跳出面板（右側或輸入框上方），一眼看出每個子代理在做什麼、有沒有卡住或失敗：類型或名稱、模型、正在做什麼、token 與時間，卡住時轉黃；卡片左邊有像素小人，依派出順序換配件，執行中會走路，卡住變黃、完成閉眼、失敗變灰（開啟終端機圖片時改畫細像素的圖片版，見下方「agent-panel：開啟圖片版小人」）；子代理多或放在輸入框上方時一個一列，面板放不下時輸入框下方顯示一行狀態；`/agents` 開關 |
 
 ## 在新電腦安裝
 
@@ -33,6 +33,22 @@ claude plugin install agent-panel@my-mods
 | GitHub | `gh auth login`，token 跟 gh CLI 共用 | 不檢查 GitHub |
 
 設定值存在這台電腦的 Claude Code 設定裡，不在這個 repo。
+
+## agent-panel：開啟圖片版小人
+
+小人預設用方塊字元畫，一格只能畫上下兩個像素，比較粗。有設定環境變數 `CLAUDE_CODE_FORCE_TERMINAL_IMAGES`（非空）時，改用 kitty 圖片協定畫 4 欄 × 2 列的細像素小人；沒有設定時維持方塊版。
+
+在 cmux 裡使用時，在 shell 設定檔（例如 `~/.zshrc`）加入只在 cmux、而且不在 tmux 時開啟的設定：
+
+```zsh
+if [[ -n "$CMUX_SURFACE_ID" && -z "$TMUX" ]]; then
+  export CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1
+fi
+```
+
+- 只在 cmux 開：不支援 kitty 圖片的終端機強制開啟，會出現亂碼或空白；不在 tmux 開：tmux 不會把圖片轉給終端機
+- 背景 session 會繼承背景服務（`claude daemon`）啟動時的環境變數。改完設定後開新分頁，執行 `claude daemon stop --any`（會結束所有背景 session，對話保留），再從新分頁 `claude attach` 或 `claude --resume` 接回
+- 不要改用 `settings.json` 的 `env`：它會套用到所有終端機，而且無法確認它在 Claude Code 判斷圖片能力之前就生效
 
 ## 開發
 

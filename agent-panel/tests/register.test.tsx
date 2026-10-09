@@ -282,6 +282,18 @@ test('熱重載後 session.start 接回計時器', async ($, on) => {
   expect(control.state.get('tick')).toBeGreaterThan(0)
 })
 
+test('讀不到 CLAUDE_CODE_FORCE_TERMINAL_IMAGES（env.get 失敗）時 session.start 照常做完後面的事', async ($, on) => {
+  const control = engine(on, { batch: { turnId: 't1', agents: [runningRow('a1')] } })
+  control.listed = [{ id: 'a2', description: '補上的', status: 'running', type: 'Explore' }]
+  on('env.get', () => {
+    throw new Error('讀不到環境變數')
+  })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/w' } as any)
+  // 讀環境變數之後的步驟照常跑：從 $.agent.list() 補上子代理、第一次同步送出狀態列
+  expect((control.state.get('batch')).agents.map((agent: any) => agent.id)).toEqual(['a1', 'a2'])
+  expect(control.statuses).toEqual(['Agents ●2'])
+})
+
 test('熱重載後從 $.agent.list() 補上的子代理，類型取清單的 type、名字是 null', async ($, on) => {
   const control = engine(on, { batch: { turnId: 't1', agents: [runningRow('a1')] } })
   control.listed = [{ id: 'a2', description: '補上的', status: 'running', type: 'Explore', name: 'helper' }]

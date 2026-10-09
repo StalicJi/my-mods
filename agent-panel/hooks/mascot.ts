@@ -10,7 +10,7 @@ export type MascotCell = { char: string; foreground: number; background: number 
 type MascotOptions = { look: number; size: MascotSize; state: MascotState; frame: number }
 
 // 像素圖的字母：'.' 透明、'B' 身體（顏色依狀態）、'E' 眼睛，其他字母是配件，顏色查各配件的 palette
-type Palette = Record<string, number>
+export type Palette = Record<string, number>
 type Accessory = { palette: Palette; large: string[]; small: string[] }
 
 const TRANSPARENT = '.'
@@ -19,16 +19,16 @@ const EYE = 'E'
 
 // Raster 的 0x01000000 是終端機預設色，當透明用，背景跟面板融在一起
 const TERMINAL_DEFAULT = 0x01000000
-const EYE_COLOR = 0x1f1f24
+export const EYE_COLOR = 0x1f1f24
 // 卡住的黃色跟面板卡住時的進度條一致；失敗轉灰、眼睛打叉，一眼就跟完成（瞇眼笑）分開
-const STATE_STYLES: Record<MascotState, { bodyColor: number; eye: string }> = {
+export const STATE_STYLES: Record<MascotState, { bodyColor: number; eye: string }> = {
   running: { bodyColor: 0xd97757, eye: '•' },
   stalled: { bodyColor: 0xe5c07b, eye: '•' },
   done: { bodyColor: 0xd97757, eye: '^' },
   failed: { bodyColor: 0x8a8a94, eye: '×' },
 }
 // 計時器每拍 0.2 秒；每 3 拍（0.6 秒）換一次腳，比每拍都換穩重，面板上好幾隻一起走也不會太花
-const WALK_STEP_FRAMES = 3
+export const WALK_STEP_FRAMES = 3
 
 // 大小人 8 個像素高（4 列）：上面 3 個像素留給配件，身體 4 個像素（第 2 個起是眼睛、第 3 個兩側伸出手），最下面是腳
 const LARGE_BODY = [
@@ -149,6 +149,8 @@ const ACCESSORIES: Accessory[] = [
 ]
 
 export const LOOK_COUNT: number = ACCESSORIES.length
+// 圖片版（mascot-image.ts）沿用同一套配件顏色，像素圖的字母也跟這裡一樣
+export const ACCESSORY_PALETTES: readonly Palette[] = ACCESSORIES.map(accessory => accessory.palette)
 
 export function mascotGrid({ look, size, state, frame }: MascotOptions): MascotCell[][] {
   const accessory = ACCESSORIES[wrapIndex(look, LOOK_COUNT)]!
@@ -168,7 +170,7 @@ function legs(state: MascotState, frame: number): string {
 }
 
 // 把任意數字換算成 0 到 count - 1：負數從尾端繞回來，小數捨去，NaN、Infinity 當 0
-function wrapIndex(value: number, count: number): number {
+export function wrapIndex(value: number, count: number): number {
   if (!Number.isFinite(value)) return 0
   return ((Math.floor(value) % count) + count) % count
 }
@@ -236,7 +238,7 @@ export function encodeRasterCells(grid: MascotCell[][]): string {
 
 // 不用 Uint8Array.prototype.toBase64：claude plugin test 的環境有，但 ES2023 的型別與 Node 20 都沒有。
 // 每 3 個位元組（24 bits）切成 4 個 6 bits 查表；尾端不足 3 個位元組時用 = 補齊
-function toBase64(bytes: Uint8Array): string {
+export function toBase64(bytes: Uint8Array): string {
   let encoded = ''
   for (let index = 0; index < bytes.length; index += 3) {
     const remaining = bytes.length - index

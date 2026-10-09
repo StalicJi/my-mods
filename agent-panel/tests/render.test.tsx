@@ -1,7 +1,9 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import { MASCOT_GAP, displayWidth, fullRowCount } from '../hooks/layout'
+import type { FullModeOptions } from '../hooks/layout'
 import { mascotRaster } from '../hooks/mascot'
+import { mascotImage } from '../hooks/mascot-image'
 import type { AgentRow } from '../types'
 import { stateStore } from './state-store'
 
@@ -37,6 +39,35 @@ function mountWith($: any, on: any, agents: AgentRow[] | null, options: PaneOpti
   return mount($, options)
 }
 
+const FORCE_IMAGES = 'CLAUDE_CODE_FORCE_TERMINAL_IMAGES'
+
+// 代替 host 回答 session.start 與環境變數（$ 呼叫的 stub 包成 { value }）；variables 可以在測試中途改。
+// 回傳 mod 讀過的變數名稱，讀一次記一筆
+function environment(on: any, variables: Record<string, string>) {
+  const reads: string[] = []
+  on('session.start', (_$: any, e: any) => ({ sessionId: 's', cwd: e.cwd }))
+  on('env.get', (_$: any, e: any) => {
+    reads.push(e.name)
+    return { value: variables[e.name] }
+  })
+  return reads
+}
+
+const startSession = ($: any) => $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/w' })
+
+// session 開始時環境變數是 variables，之後才掛載面板
+async function setupSession($: any, on: any, agents: AgentRow[] | null, variables: Record<string, string>) {
+  setup(on, agents)
+  environment(on, variables)
+  await startSession($)
+}
+
+// 有設 CLAUDE_CODE_FORCE_TERMINAL_IMAGES 的 session（例如 cmux 裡）
+async function mountWithImages($: any, on: any, agents: AgentRow[], options: PaneOptions = {}) {
+  await setupSession($, on, agents, { [FORCE_IMAGES]: '1' })
+  return mount($, options)
+}
+
 function textOf(node: any): string {
   if (typeof node === 'string') return node
   if (!node || typeof node !== 'object') return ''
@@ -56,11 +87,14 @@ function countNodes(node: any, matches: (node: any) => boolean): number {
   return (matches(node) ? 1 : 0) + children.reduce((sum: number, child) => sum + countNodes(child, matches), 0)
 }
 
-// 畫了小人的卡片：一個橫向 Box，直接的子元素裡有 Raster
+// 小人是 Raster（方塊版）或 Image（圖片版）
+const isMascot = (node: any) => node?.type === 'Raster' || node?.type === 'Image'
+
+// 畫了小人的卡片：一個橫向 Box，直接的子元素裡有小人
 function mascotCards(node: any): any[] {
   if (!node || typeof node !== 'object') return []
   const children = (node.children ?? []) as any[]
-  const own = node.type === 'Box' && children.some(child => child?.type === 'Raster') ? [node] : []
+  const own = node.type === 'Box' && children.some(isMascot) ? [node] : []
   return [...own, ...children.flatMap(mascotCards)]
 }
 
@@ -75,9 +109,9 @@ function mascotSpans(drawn: any): { from: number; to: number }[] {
       return
     }
     const children = (node.children ?? []) as any[]
-    const raster = node.type === 'Box' ? children.find(child => child?.type === 'Raster') : undefined
-    if (raster !== undefined) {
-      spans.push({ from: rowIndex, to: rowIndex + raster.props.rows })
+    const mascot = node.type === 'Box' ? children.find(isMascot) : undefined
+    if (mascot !== undefined) {
+      spans.push({ from: rowIndex, to: rowIndex + mascot.props.rows })
       rowIndex += drawnRows(node).length
       return
     }
@@ -87,12 +121,14 @@ function mascotSpans(drawn: any): { from: number; to: number }[] {
   return spans
 }
 
-const rowCountOf = (agents: AgentRow[], options: { withMascot: boolean }) => fullRowCount({ turnId: 't1', agents }, options)
+const rowCountOf = (agents: AgentRow[], options: FullModeOptions) => fullRowCount({ turnId: 't1', agents }, options)
 
 const GROUP_LABEL = /^(Running|Failed|Done)/
 const CARD_TITLE = /^[●✗✓] /
 const isBlank = (line: string) => line.trim() === ''
 const rastersOf = async (ui: any) => (await ui.findAll({ type: 'Raster' })) as any[]
+const imagesOf = async (ui: any) => (await ui.findAll({ type: 'Image' })) as any[]
+const blankIndexes = (rows: string[]) => rows.flatMap((line, index) => (isBlank(line) ? [index] : []))
 
 test('沒有批次時顯示提示', async ($, on) => {
   const ui = await mountWith($, on, null)
@@ -133,7 +169,7 @@ test('完整模式：列數等於 fullRowCount，組與組之間空一列，頭�
   const agents = [row('a'), failed('f'), done('d')]
   const ui = await mountWith($, on, agents)
   const rows = drawnRows(await ui.drawn())
-  expect(rows).toHaveLength(rowCountOf(agents, { withMascot: true }))
+  expect(rows).toHaveLength(rowCountOf(agents, { mascot: 'raster' }))
   expect(rows[1]).toBe('Running')
   // 空行後面接的一定是下一組的組名
   const afterBlank = rows.flatMap((line, index) => (isBlank(line) ? [rows[index + 1]] : []))
@@ -156,7 +192,7 @@ test('面板放在輸入框上方時用精簡模式：每個子代理一列，�
 
 test('完整模式超過面板可見列數時改精簡模式，剛好放得下時維持完整模式', async ($, on) => {
   const agents = [row('a'), row('b'), done('d')]
-  const fullRows = rowCountOf(agents, { withMascot: true })
+  const fullRows = rowCountOf(agents, { mascot: 'raster' })
   setup(on, agents)
   const fits = await mount($, { bodyRows: fullRows })
   expect(drawnRows(await fits.drawn())).toHaveLength(fullRows)
@@ -216,7 +252,7 @@ test('畫上小人後：卡片文字少 8 欄、狀態列仍是整個寬度，�
   const ui = await mountWith($, on, agents)
   const drawn = await ui.drawn()
   const rows = drawnRows(drawn)
-  expect(rows).toHaveLength(rowCountOf(agents, { withMascot: true }))
+  expect(rows).toHaveLength(rowCountOf(agents, { mascot: 'raster' }))
   expect(displayWidth(rows[0]!)).toBe(42)
   expect(rows.filter(line => CARD_TITLE.test(line)).map(displayWidth)).toEqual([34, 34, 34])
   expect(rows.filter(line => line.includes('▆')).map(displayWidth)).toEqual([34])
@@ -236,7 +272,7 @@ test('精簡模式不畫小人：放在輸入框上方，或完整模式放不�
   const inline = await mount($, { placement: 'inline', bodyColumns: 100 })
   expect(await rastersOf(inline)).toEqual([])
   await inline.unmount()
-  const overflows = await mount($, { bodyRows: rowCountOf(agents, { withMascot: true }) - 1 })
+  const overflows = await mount($, { bodyRows: rowCountOf(agents, { mascot: 'raster' }) - 1 })
   expect(drawnRows(await overflows.drawn())).toHaveLength(1 + agents.length)
   expect(await rastersOf(overflows)).toEqual([])
   await overflows.unmount()
@@ -260,7 +296,7 @@ test('終端機以外的介面（desktop 的 Raster 畫成空的 fragment）不�
   const drawn = await ui.drawn()
   expect(mascotCards(drawn)).toEqual([])
   const rows = drawnRows(drawn)
-  expect(rows).toHaveLength(rowCountOf(agents, { withMascot: false }))
+  expect(rows).toHaveLength(rowCountOf(agents, { mascot: null }))
   expect(rows.filter(line => CARD_TITLE.test(line)).map(displayWidth)).toEqual([42, 42])
   await ui.unmount()
 })
@@ -270,7 +306,7 @@ test('畫小人時，相鄰兩張完成卡片之間空一列，兩隻小小人�
   const ui = await mountWith($, on, agents)
   const drawn = await ui.drawn()
   const rows = drawnRows(drawn)
-  expect(rows).toHaveLength(rowCountOf(agents, { withMascot: true }))
+  expect(rows).toHaveLength(rowCountOf(agents, { mascot: 'raster' }))
   // 狀態列、Done、第一張卡片 2 列，接著空一列，再接第二張卡片
   expect(rows.flatMap((line, index) => (isBlank(line) ? [index] : []))).toEqual([4])
   expect(rows[5]).toMatch(CARD_TITLE)
@@ -284,7 +320,7 @@ test('畫小人時，三張完成卡片之間各空一列，最後一張後面�
   const ui = await mountWith($, on, agents)
   const drawn = await ui.drawn()
   const rows = drawnRows(drawn)
-  expect(rows).toHaveLength(rowCountOf(agents, { withMascot: true }))
+  expect(rows).toHaveLength(rowCountOf(agents, { mascot: 'raster' }))
   expect(rows.flatMap((line, index) => (isBlank(line) ? [index] : []))).toEqual([4, 7])
   const spans = mascotSpans(drawn)
   expect(spans.slice(1).map((span, index) => span.from - spans[index]!.to)).toEqual([1, 1])
@@ -295,8 +331,8 @@ test('畫小人時，執行中與失敗卡片之間不多空列，空行只在�
   const agents = [row('a'), row('b'), failed('f1'), failed('f2'), done('d')]
   const ui = await mountWith($, on, agents)
   const rows = drawnRows(await ui.drawn())
-  expect(rows).toHaveLength(rowCountOf(agents, { withMascot: true }))
-  expect(rows).toHaveLength(rowCountOf(agents, { withMascot: false }))
+  expect(rows).toHaveLength(rowCountOf(agents, { mascot: 'raster' }))
+  expect(rows).toHaveLength(rowCountOf(agents, { mascot: null }))
   expect(rows.flatMap((line, index) => (isBlank(line) ? [rows[index + 1]] : []))).toEqual(['Failed', 'Done'])
   await ui.unmount()
 })
@@ -307,7 +343,7 @@ test('不畫小人時（面板太窄、終端機以外的介面、精簡模式�
   for (const options of [{ bodyColumns: 31 }, { surface: 'desktop' as const }]) {
     const ui = await mount($, options)
     const rows = drawnRows(await ui.drawn())
-    expect(rows).toHaveLength(rowCountOf(agents, { withMascot: false }))
+    expect(rows).toHaveLength(rowCountOf(agents, { mascot: null }))
     expect(rows.filter(isBlank)).toEqual([])
     await ui.unmount()
   }
@@ -322,7 +358,7 @@ test('判斷精簡模式時，列數依實際會不會畫小人計算', async ($
   const agents = [done('d1'), done('d2'), done('d3')]
   setup(on, agents)
   // 會畫小人：空列也算進去，剛好放得下才維持完整模式
-  const withMascotRows = rowCountOf(agents, { withMascot: true })
+  const withMascotRows = rowCountOf(agents, { mascot: 'raster' })
   const fits = await mount($, { bodyRows: withMascotRows })
   expect(drawnRows(await fits.drawn())).toHaveLength(withMascotRows)
   await fits.unmount()
@@ -330,7 +366,7 @@ test('判斷精簡模式時，列數依實際會不會畫小人計算', async ($
   expect(drawnRows(await overflows.drawn())).toHaveLength(1 + agents.length)
   await overflows.unmount()
   // 不畫小人（終端機以外的介面）：不多算空列，放得下就維持完整模式
-  const plainRows = rowCountOf(agents, { withMascot: false })
+  const plainRows = rowCountOf(agents, { mascot: null })
   const desktop = await mount($, { surface: 'desktop', bodyRows: plainRows })
   expect(drawnRows(await desktop.drawn())).toHaveLength(plainRows)
   await desktop.unmount()
@@ -343,4 +379,168 @@ test('舊版存下、沒有 look 的列照常畫，小人是第一種造型', as
   const rasters = await rastersOf(ui)
   expect(rasters.map(raster => raster.props.cells)).toEqual([mascotRaster({ look: 0, size: 'large', state: 'running', frame: 0 }).cells])
   await ui.unmount()
+})
+
+// 圖片版小人：有設 CLAUDE_CODE_FORCE_TERMINAL_IMAGES 的終端機畫 Image（細像素），不然畫上面的方塊版
+
+test('有設 CLAUDE_CODE_FORCE_TERMINAL_IMAGES 時，每張卡片左邊畫圖片版小人：4×2、source 是 mascotImage、alt 有值，不畫方塊版', async ($, on) => {
+  const ui = await mountWithImages($, on, [done('d', { look: 2 }), row('a', { look: 0 }), failed('f', { look: 1 })])
+  const images = await imagesOf(ui)
+  expect(images.map(image => [image.key, image.props.columns, image.props.rows])).toEqual([
+    ['mascot-a', 4, 2],
+    ['mascot-f', 4, 2],
+    ['mascot-d', 4, 2],
+  ])
+  expect(images.map(image => image.props.source)).toEqual([
+    mascotImage({ look: 0, state: 'running', frame: 0 }),
+    mascotImage({ look: 1, state: 'failed', frame: 0 }),
+    mascotImage({ look: 2, state: 'done', frame: 0 }),
+  ])
+  for (const image of images) {
+    expect(typeof image.props.alt).toBe('string')
+    expect(image.props.alt.length).toBeGreaterThan(0)
+  }
+  expect(await rastersOf(ui)).toEqual([])
+  await ui.unmount()
+})
+
+test('沒設 CLAUDE_CODE_FORCE_TERMINAL_IMAGES 時畫方塊版小人', async ($, on) => {
+  await setupSession($, on, [row('a'), done('d')], {})
+  const ui = await mount($)
+  expect(await imagesOf(ui)).toEqual([])
+  expect((await rastersOf(ui)).map(raster => raster.key)).toEqual(['mascot-a', 'mascot-d'])
+  await ui.unmount()
+})
+
+test('CLAUDE_CODE_FORCE_TERMINAL_IMAGES 是空字串時當成沒設（跟 Claude Code 一樣非空才算開），畫方塊版', async ($, on) => {
+  await setupSession($, on, [row('a'), done('d')], { [FORCE_IMAGES]: '' })
+  const ui = await mount($)
+  expect(await imagesOf(ui)).toEqual([])
+  expect(await rastersOf(ui)).toHaveLength(2)
+  await ui.unmount()
+})
+
+test('終端機以外的介面就算設了 CLAUDE_CODE_FORCE_TERMINAL_IMAGES 也不畫小人，卡片照舊用整個寬度', async ($, on) => {
+  const agents = [row('a'), done('d')]
+  const ui = await mountWithImages($, on, agents, { surface: 'desktop' })
+  const drawn = await ui.drawn()
+  expect(mascotCards(drawn)).toEqual([])
+  const rows = drawnRows(drawn)
+  expect(rows).toHaveLength(rowCountOf(agents, { mascot: null }))
+  expect(rows.filter(line => CARD_TITLE.test(line)).map(displayWidth)).toEqual([42, 42])
+  await ui.unmount()
+})
+
+test('圖片版：卡片文字少 5 欄（方塊版少 8 欄）、狀態列仍是整個寬度，小人跟文字隔 1 欄、不比卡片高，列數等於 fullRowCount', async ($, on) => {
+  const agents = [row('a'), failed('f'), done('d')]
+  const ui = await mountWithImages($, on, agents)
+  const drawn = await ui.drawn()
+  const rows = drawnRows(drawn)
+  expect(rows).toHaveLength(rowCountOf(agents, { mascot: 'image' }))
+  expect(displayWidth(rows[0]!)).toBe(42)
+  expect(rows.filter(line => CARD_TITLE.test(line)).map(displayWidth)).toEqual([37, 37, 37])
+  expect(rows.filter(line => line.includes('▆')).map(displayWidth)).toEqual([37])
+  const cards = mascotCards(drawn)
+  expect(cards).toHaveLength(3)
+  for (const card of cards) {
+    expect(card.props).toMatchObject({ flexDirection: 'row', columnGap: MASCOT_GAP })
+    const image = card.children.find((child: any) => child?.type === 'Image')
+    expect(image.props.rows).toBeLessThanOrEqual(drawnRows(card).length)
+  }
+  await ui.unmount()
+})
+
+test('圖片版：相鄰兩張完成卡片之間空一列，兩隻小人隔一列、不黏成一隻；列數等於 fullRowCount', async ($, on) => {
+  const agents = [done('d1'), done('d2'), done('d3')]
+  const ui = await mountWithImages($, on, agents)
+  const drawn = await ui.drawn()
+  const rows = drawnRows(drawn)
+  expect(rows).toHaveLength(rowCountOf(agents, { mascot: 'image' }))
+  // 狀態列、Done、第一張卡片 2 列，接著空一列，再接第二張卡片
+  expect(blankIndexes(rows)).toEqual([4, 7])
+  const spans = mascotSpans(drawn)
+  expect(spans.slice(1).map((span, index) => span.from - spans[index]!.to)).toEqual([1, 1])
+  await ui.unmount()
+})
+
+test('圖片版：執行中與失敗卡片之間不多空列，空行只在組與組之間', async ($, on) => {
+  const agents = [row('a'), row('b'), failed('f1'), failed('f2'), done('d')]
+  const ui = await mountWithImages($, on, agents)
+  const rows = drawnRows(await ui.drawn())
+  expect(await imagesOf(ui)).toHaveLength(5)
+  expect(rows).toHaveLength(rowCountOf(agents, { mascot: 'image' }))
+  expect(rows).toHaveLength(rowCountOf(agents, { mascot: null }))
+  expect(rows.flatMap((line, index) => (isBlank(line) ? [rows[index + 1]] : []))).toEqual(['Failed', 'Done'])
+  await ui.unmount()
+})
+
+test('圖片版：判斷精簡模式時用圖片版的列數；精簡模式不畫小人', async ($, on) => {
+  const agents = [done('d1'), done('d2'), done('d3')]
+  await setupSession($, on, agents, { [FORCE_IMAGES]: '1' })
+  const imageRows = rowCountOf(agents, { mascot: 'image' })
+  const fits = await mount($, { bodyRows: imageRows })
+  expect(drawnRows(await fits.drawn())).toHaveLength(imageRows)
+  expect(await imagesOf(fits)).toHaveLength(3)
+  await fits.unmount()
+  const overflows = await mount($, { bodyRows: imageRows - 1 })
+  expect(drawnRows(await overflows.drawn())).toHaveLength(1 + agents.length)
+  expect(await imagesOf(overflows)).toEqual([])
+  await overflows.unmount()
+  const inline = await mount($, { placement: 'inline', bodyColumns: 100 })
+  expect(await imagesOf(inline)).toEqual([])
+  await inline.unmount()
+})
+
+test('圖片版：面板太窄（文字剩不到 24 欄）不畫小人，卡片照舊用整個寬度', async ($, on) => {
+  await setupSession($, on, [row('a'), done('d')], { [FORCE_IMAGES]: '1' })
+  const narrow = await mount($, { bodyColumns: 28 })
+  expect(mascotCards(await narrow.drawn())).toEqual([])
+  expect(drawnRows(await narrow.drawn()).filter(line => CARD_TITLE.test(line)).map(displayWidth)).toEqual([28, 28])
+  await narrow.unmount()
+  const enough = await mount($, { bodyColumns: 29 })
+  expect(await imagesOf(enough)).toHaveLength(2)
+  expect(drawnRows(await enough.drawn()).filter(line => CARD_TITLE.test(line)).map(displayWidth)).toEqual([24, 24])
+  await enough.unmount()
+})
+
+test('圖片版：舊版存下、沒有 look 的列照常畫，小人是第一種造型', async ($, on) => {
+  const { look: _look, ...legacy } = row('a', { look: 3 })
+  const ui = await mountWithImages($, on, [legacy as AgentRow])
+  expect(await ui.find({ type: 'Text', text: /^面板暫時畫不出來/ })).toBeUndefined()
+  expect((await imagesOf(ui)).map(image => image.props.source)).toEqual([mascotImage({ look: 0, state: 'running', frame: 0 })])
+  await ui.unmount()
+})
+
+test('CLAUDE_CODE_FORCE_TERMINAL_IMAGES 只在 session.start 讀一次：重畫不再讀，還沒讀到之前當成沒設', async ($, on) => {
+  setup(on, [row('a')])
+  const reads = environment(on, { [FORCE_IMAGES]: '1' })
+  const before = await mount($)
+  expect(await imagesOf(before)).toEqual([])
+  expect(await rastersOf(before)).toHaveLength(1)
+  await before.unmount()
+  expect(reads).toEqual([])
+  await startSession($)
+  expect(reads).toEqual([FORCE_IMAGES])
+  for (let redraw = 0; redraw < 3; redraw++) {
+    const ui = await mount($)
+    expect(await imagesOf(ui)).toHaveLength(1)
+    await ui.unmount()
+  }
+  expect(reads).toEqual([FORCE_IMAGES])
+})
+
+test('熱重載重跑 session.start 時重新讀 CLAUDE_CODE_FORCE_TERMINAL_IMAGES：拿掉之後改畫方塊版', async ($, on) => {
+  setup(on, [row('a')])
+  const variables: Record<string, string> = { [FORCE_IMAGES]: '1' }
+  environment(on, variables)
+  await startSession($)
+  const withImages = await mount($)
+  expect(await imagesOf(withImages)).toHaveLength(1)
+  await withImages.unmount()
+  delete variables[FORCE_IMAGES]
+  await startSession($)
+  const withoutImages = await mount($)
+  expect(await imagesOf(withoutImages)).toEqual([])
+  expect(await rastersOf(withoutImages)).toHaveLength(1)
+  await withoutImages.unmount()
 })
