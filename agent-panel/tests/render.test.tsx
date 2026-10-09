@@ -1,14 +1,15 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { displayWidth, fullRowCount } from '../hooks/layout'
+import { MASCOT_GAP, displayWidth, fullRowCount } from '../hooks/layout'
+import { mascotRaster } from '../hooks/mascot'
 import type { AgentRow } from '../types'
 import { stateStore } from './state-store'
 
-type PaneOptions = { bodyColumns?: number; placement?: 'dock' | 'inline'; bodyRows?: number }
+type PaneOptions = { bodyColumns?: number; placement?: 'dock' | 'inline'; bodyRows?: number; surface?: 'terminal' | 'desktop' }
 
-const paneOf = ({ bodyColumns = 42, placement = 'dock', bodyRows = 40 }: PaneOptions = {}) => ({
+const paneOf = ({ bodyColumns = 42, placement = 'dock', bodyRows = 40, surface = 'terminal' }: PaneOptions = {}) => ({
   plugin: 'agent-panel',
-  surface: 'terminal',
+  surface,
   component: 'Pane',
   requestId: 'agent-panel',
   props: { title: 'Agents', isFocused: false, bodyColumns, placement, scroll: { offset: 0, bodyRows }, view: {} },
@@ -18,7 +19,7 @@ const row = (id: string, patch: Partial<AgentRow> = {}): AgentRow => ({
   id, description: `任務 ${id}`, agentType: 'Explore', agentName: null, isNested: false, status: 'running', startedAt: 0,
   endedAt: null, failureReason: null, model: 'claude-opus-5-5', effort: 'xhigh', toolCount: 3, activity: '讀取 src/app.ts',
   activityStartedAt: 0, lastUsage: { input_tokens: 1000, output_tokens: 500, cache_read_input_tokens: 25_000, cache_creation_input_tokens: 0 },
-  reportedTokens: null, ...patch,
+  reportedTokens: null, look: 0, ...patch,
 })
 const done = (id: string, patch: Partial<AgentRow> = {}) => row(id, { status: 'done', endedAt: 5000, ...patch })
 const failed = (id: string, patch: Partial<AgentRow> = {}) => row(id, { status: 'failed', endedAt: 9000, failureReason: '已中斷', ...patch })
@@ -55,8 +56,18 @@ function countNodes(node: any, matches: (node: any) => boolean): number {
   return (matches(node) ? 1 : 0) + children.reduce((sum: number, child) => sum + countNodes(child, matches), 0)
 }
 
+// 畫了小人的卡片：一個橫向 Box，直接的子元素裡有 Raster
+function mascotCards(node: any): any[] {
+  if (!node || typeof node !== 'object') return []
+  const children = (node.children ?? []) as any[]
+  const own = node.type === 'Box' && children.some(child => child?.type === 'Raster') ? [node] : []
+  return [...own, ...children.flatMap(mascotCards)]
+}
+
 const GROUP_LABEL = /^(Running|Failed|Done)/
+const CARD_TITLE = /^[●✗✓] /
 const isBlank = (line: string) => line.trim() === ''
+const rastersOf = async (ui: any) => (await ui.findAll({ type: 'Raster' })) as any[]
 
 test('沒有批次時顯示提示', async ($, on) => {
   const ui = await mountWith($, on, null)
@@ -154,5 +165,86 @@ test('狀態資料壞掉時畫出錯誤提示，不讓面板消失', async ($, o
   stateStore(on, { batch: { turnId: 't1', agents: null } })
   const ui = await mount($)
   expect(await ui.find({ type: 'Text', text: /^面板暫時畫不出來/ })).toBeDefined()
+  await ui.unmount()
+})
+
+// 子代理卡片左邊的像素小人
+
+test('寬面板的完整模式：每張卡片左邊一隻小人，執行中大的、完成與失敗小的，造型取 look', async ($, on) => {
+  const ui = await mountWith($, on, [done('d', { look: 2 }), row('a', { look: 0 }), failed('f', { look: 1 })])
+  const rasters = await rastersOf(ui)
+  expect(rasters.map(raster => [raster.key, raster.props.columns, raster.props.rows])).toEqual([
+    ['mascot-a', 7, 4],
+    ['mascot-f', 7, 2],
+    ['mascot-d', 7, 2],
+  ])
+  expect(rasters.map(raster => raster.props.cells)).toEqual([
+    mascotRaster({ look: 0, size: 'large', state: 'running', frame: 0 }).cells,
+    mascotRaster({ look: 1, size: 'small', state: 'failed', frame: 0 }).cells,
+    mascotRaster({ look: 2, size: 'small', state: 'done', frame: 0 }).cells,
+  ])
+  await ui.unmount()
+})
+
+test('畫上小人後：卡片文字少 8 欄、狀態列仍是整個寬度，小人跟文字隔 1 欄、不比卡片高，列數仍等於 fullRowCount', async ($, on) => {
+  const agents = [row('a'), failed('f'), done('d')]
+  const ui = await mountWith($, on, agents)
+  const drawn = await ui.drawn()
+  const rows = drawnRows(drawn)
+  expect(rows).toHaveLength(fullRowCount({ turnId: 't1', agents }))
+  expect(displayWidth(rows[0]!)).toBe(42)
+  expect(rows.filter(line => CARD_TITLE.test(line)).map(displayWidth)).toEqual([34, 34, 34])
+  expect(rows.filter(line => line.includes('▆')).map(displayWidth)).toEqual([34])
+  const cards = mascotCards(drawn)
+  expect(cards).toHaveLength(3)
+  for (const card of cards) {
+    expect(card.props).toMatchObject({ flexDirection: 'row', columnGap: MASCOT_GAP })
+    const raster = card.children.find((child: any) => child?.type === 'Raster')
+    expect(raster.props.rows).toBeLessThanOrEqual(drawnRows(card).length)
+  }
+  await ui.unmount()
+})
+
+test('精簡模式不畫小人：放在輸入框上方，或完整模式放不下', async ($, on) => {
+  const agents = [row('a'), row('b'), done('d')]
+  setup(on, agents)
+  const inline = await mount($, { placement: 'inline', bodyColumns: 100 })
+  expect(await rastersOf(inline)).toEqual([])
+  await inline.unmount()
+  const overflows = await mount($, { bodyRows: fullRowCount({ turnId: 't1', agents }) - 1 })
+  expect(drawnRows(await overflows.drawn())).toHaveLength(1 + agents.length)
+  expect(await rastersOf(overflows)).toEqual([])
+  await overflows.unmount()
+})
+
+test('面板太窄（文字剩不到 24 欄）不畫小人，卡片照舊用整個寬度', async ($, on) => {
+  setup(on, [row('a'), done('d')])
+  const narrow = await mount($, { bodyColumns: 31 })
+  expect(await rastersOf(narrow)).toEqual([])
+  expect(drawnRows(await narrow.drawn()).filter(line => CARD_TITLE.test(line)).map(displayWidth)).toEqual([31, 31])
+  await narrow.unmount()
+  const enough = await mount($, { bodyColumns: 32 })
+  expect(await rastersOf(enough)).toHaveLength(2)
+  expect(drawnRows(await enough.drawn()).filter(line => CARD_TITLE.test(line)).map(displayWidth)).toEqual([24, 24])
+  await enough.unmount()
+})
+
+test('終端機以外的介面（desktop 的 Raster 畫成空的 fragment）不畫小人，卡片照舊用整個寬度', async ($, on) => {
+  const agents = [row('a'), done('d')]
+  const ui = await mountWith($, on, agents, { surface: 'desktop' })
+  const drawn = await ui.drawn()
+  expect(mascotCards(drawn)).toEqual([])
+  const rows = drawnRows(drawn)
+  expect(rows).toHaveLength(fullRowCount({ turnId: 't1', agents }))
+  expect(rows.filter(line => CARD_TITLE.test(line)).map(displayWidth)).toEqual([42, 42])
+  await ui.unmount()
+})
+
+test('舊版存下、沒有 look 的列照常畫，小人是第一種造型', async ($, on) => {
+  const { look: _look, ...legacy } = row('a', { look: 3 })
+  const ui = await mountWith($, on, [legacy as AgentRow])
+  expect(await ui.find({ type: 'Text', text: /^面板暫時畫不出來/ })).toBeUndefined()
+  const rasters = await rastersOf(ui)
+  expect(rasters.map(raster => raster.props.cells)).toEqual([mascotRaster({ look: 0, size: 'large', state: 'running', frame: 0 }).cells])
   await ui.unmount()
 })

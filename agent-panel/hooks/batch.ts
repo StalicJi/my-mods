@@ -27,7 +27,7 @@ const THINKING_ACTIVITY = '思考中'
 const LIVE_STATUSES: ReadonlySet<string> = new Set(['pending', 'running', 'waiting'])
 
 // 還沒有任何動作，目前動作的開始時間先用派出時間
-function newRow(spawn: SpawnFacts): AgentRow {
+function newRow(spawn: SpawnFacts, look: number): AgentRow {
   return {
     ...spawn,
     status: 'running',
@@ -40,7 +40,22 @@ function newRow(spawn: SpawnFacts): AgentRow {
     activityStartedAt: spawn.startedAt,
     lastUsage: null,
     reportedTokens: null,
+    look,
   }
+}
+
+// host 保存的批次可能有舊版記下、沒有 look 的列：當成第一種造型，畫面不會壞，配號時也算 0 已被用掉
+export function agentLook(row: AgentRow): number {
+  return row.look ?? 0
+}
+
+// 造型依派出順序輪流：挑這一批還沒用掉的最小號碼。跨回合還在跑的保留原本的造型，新派的不會跟它撞；
+// 完成後被新批次清掉的號碼可以再用，號碼才不會越跳越大（超過造型數時由 mascot.ts 取餘數）
+function nextLook(agents: readonly AgentRow[]): number {
+  const used = new Set(agents.map(agentLook))
+  let look = 0
+  while (used.has(look)) look += 1
+  return look
 }
 
 // 新回合開新一批，帶過還在跑的（背景子代理可能跨回合）；turnId 不明（剛熱重載，模組變數歸零）時沿用現有批次
@@ -63,7 +78,7 @@ const finiteNumber = (value: unknown) => (typeof value === 'number' && Number.is
 export function addAgent(batch: Batch | null, currentTurnId: string | null, spawn: SpawnFacts): Batch {
   const current = batchForTurn(batch, currentTurnId)
   if (current.agents.some(agent => agent.id === spawn.id)) return current
-  return { ...current, agents: [...current.agents, newRow(spawn)] }
+  return { ...current, agents: [...current.agents, newRow(spawn, nextLook(current.agents))] }
 }
 
 export function recordStep(
@@ -113,19 +128,21 @@ export function finishAgent(batch: Batch, agentId: string, reason: FinishReason,
 export function seedRunning(batch: Batch | null, listed: readonly ListedAgent[], now: number): Batch | null {
   if (batch === null) return null
   const known = new Set(batch.agents.map(agent => agent.id))
-  const added = listed
-    .filter(agent => agent.teammateId === undefined && LIVE_STATUSES.has(agent.status) && !known.has(agent.id))
-    .map(agent =>
-      newRow({
-        id: agent.id,
-        description: agent.description,
-        agentType: agent.type,
-        agentName: null,
-        isNested: agent.parentId !== undefined,
-        startedAt: now,
-      }),
-    )
-  return added.length === 0 ? batch : { ...batch, agents: [...batch.agents, ...added] }
+  const missing = listed.filter(agent => agent.teammateId === undefined && LIVE_STATUSES.has(agent.status) && !known.has(agent.id))
+  if (missing.length === 0) return batch
+  // 一個一個加，後面的才看得到前面剛拿走的造型號碼
+  const agents = missing.reduce<AgentRow[]>((rows, agent) => {
+    const spawn = {
+      id: agent.id,
+      description: agent.description,
+      agentType: agent.type,
+      agentName: null,
+      isNested: agent.parentId !== undefined,
+      startedAt: now,
+    }
+    return [...rows, newRow(spawn, nextLook(rows))]
+  }, batch.agents)
+  return { ...batch, agents }
 }
 
 export function hasRunning(batch: Batch | null): boolean {

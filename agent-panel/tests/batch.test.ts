@@ -12,6 +12,7 @@ import {
   recordToolCall,
   seedRunning,
 } from '../hooks/batch'
+import type { AgentRow } from '../types'
 
 const spawn = (id: string, startedAt = 0, isNested = false) => ({
   id,
@@ -51,7 +52,46 @@ test('新的一列帶上派出時的類型與名字，目前動作從派出時�
     activityStartedAt: 100,
     lastUsage: null,
     reportedTokens: null,
+    look: 0,
   })
+})
+
+test('造型編號：同一批依派出順序拿到 0、1、2', () => {
+  let b = addAgent(null, 't1', spawn('a'))
+  b = addAgent(b, 't1', spawn('b'))
+  b = addAgent(b, 't1', spawn('c'))
+  expect(b.agents.map(a => a.look)).toEqual([0, 1, 2])
+})
+
+test('造型編號：新回合帶過來的保留原本的，新派的拿這一批還沒用掉的最小號碼，被清掉的號碼可以再用', () => {
+  let b = addAgent(addAgent(addAgent(null, 't1', spawn('a')), 't1', spawn('b')), 't1', spawn('c'))
+  b = finishAgent(finishAgent(b, 'a', 'answer', 10), 'c', 'answer', 10)
+  // 新回合只帶過還在跑的 b（1）；a 的 0、c 的 2 跟著被清掉，可以再用
+  b = addAgent(b, 't2', spawn('d'))
+  b = addAgent(b, 't2', spawn('e'))
+  b = addAgent(b, 't2', spawn('f'))
+  expect(b.agents.map(a => [a.id, a.look])).toEqual([['b', 1], ['d', 0], ['e', 2], ['f', 3]])
+})
+
+test('造型編號：seedRunning 補上的列依清單順序，拿這一批還沒用掉的號碼', () => {
+  let b = addAgent(addAgent(addAgent(null, 't1', spawn('a')), 't1', spawn('b')), 't1', spawn('c'))
+  b = finishAgent(finishAgent(b, 'a', 'answer', 10), 'b', 'answer', 10)
+  b = addAgent(b, 't2', spawn('d'))
+  const seeded = seedRunning(b, [
+    { id: 'x', description: '補上的', status: 'running', type: 'general-purpose' },
+    { id: 'y', description: '補上的', status: 'pending', type: 'general-purpose' },
+  ], 50)
+  expect(seeded!.agents.map(a => [a.id, a.look])).toEqual([['c', 2], ['d', 0], ['x', 1], ['y', 3]])
+})
+
+test('造型編號：舊版存下、沒有 look 的列當成造型 0，新派與補上的都不跟它撞', () => {
+  const { look: _look, ...legacy } = addAgent(null, 't1', spawn('old')).agents[0]!
+  const b = addAgent({ turnId: 't1', agents: [legacy as AgentRow] }, 't1', spawn('a'))
+  expect(b.agents.map(a => a.look)).toEqual([undefined, 1])
+  const seeded = seedRunning({ turnId: 't1', agents: [legacy as AgentRow] }, [
+    { id: 'x', description: '補上的', status: 'running', type: 'general-purpose' },
+  ], 50)
+  expect(seeded!.agents.map(a => a.look)).toEqual([undefined, 1])
 })
 
 test('新回合開新一批：帶過跑到一半的，清掉已完成的；turnId 不明時沿用', () => {

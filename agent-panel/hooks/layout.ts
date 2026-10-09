@@ -2,7 +2,9 @@
 // displayWidth、fitToWidth、colorRuns、cometColor、describeTool 照搬自 clean-view/hooks/register.tsx
 // （mod 之間不能共用程式碼），改那邊的用字或配色時這裡要一起改
 import type { AgentRow, Batch } from '../types'
-import { agentTokens, batchTotals } from './batch'
+import { agentLook, agentTokens, batchTotals } from './batch'
+import { MASCOT_COLUMNS, mascotRaster } from './mascot'
+import type { MascotState } from './mascot'
 import { contextPercent, modelInfo } from './pricing'
 import type { ModelFamily } from './pricing'
 
@@ -17,6 +19,10 @@ type LineOptions = { columns: number; now: number; frame: number }
 // 這一步做太久就提醒使用者可能卡住了；思考本來就比工具慢，門檻放寬
 export const STALL_THINKING_MS = 300_000
 export const STALL_TOOL_MS = 180_000
+
+// 卡片左邊的小人跟文字隔一欄；扣掉小人與間隔後文字至少要有這麼寬才畫，不然寧可不畫、把寬度留給文字
+export const MASCOT_GAP = 1
+export const MIN_TEXT_COLUMNS_WITH_MASCOT = 24
 
 const ORANGE = '#f79a4f'
 const PINK = '#ec4f8f'
@@ -129,6 +135,28 @@ function runningCard(row: AgentRow, options: LineOptions, title: Span[]): Card {
     ],
     bar: runningBar(Math.max(0, columns - INDENT.length), frame, stalled),
   }
+}
+
+// 完整模式的卡片要不要在左邊畫小人，以及卡片文字剩多寬
+export function mascotLayout(bodyColumns: number): { withMascot: boolean; textColumns: number } {
+  const textColumns = bodyColumns - MASCOT_COLUMNS - MASCOT_GAP
+  return textColumns >= MIN_TEXT_COLUMNS_WITH_MASCOT ? { withMascot: true, textColumns } : { withMascot: false, textColumns: bodyColumns }
+}
+
+// 執行中的卡片 5 列畫 4 列高的大小人；完成 2 列、失敗 3 列只放得下 2 列高的小小人，小人才不會把卡片撐高
+export function agentMascot(row: AgentRow, options: { now: number; frame: number }): { columns: number; rows: number; cells: string } {
+  return mascotRaster({
+    look: agentLook(row),
+    size: row.status === 'running' ? 'large' : 'small',
+    state: mascotState(row, options.now),
+    frame: options.frame,
+  })
+}
+
+// 跟卡片用同一個卡住判斷：卡住時進度條變黃，小人也停下變黃
+function mascotState(row: AgentRow, now: number): MascotState {
+  if (row.status !== 'running') return row.status
+  return isStalled(row, now) ? 'stalled' : 'running'
 }
 
 // 精簡模式：一個子代理一列，放不下先截描述、再截動作，耗時最後才截

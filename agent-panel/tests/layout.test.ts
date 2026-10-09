@@ -2,9 +2,12 @@ import { expect, test } from 'claude-code/testing'
 
 import type { Span } from '../hooks/layout'
 import {
+  MASCOT_GAP,
+  MIN_TEXT_COLUMNS_WITH_MASCOT,
   STALL_THINKING_MS,
   STALL_TOOL_MS,
   agentCard,
+  agentMascot,
   cometColor,
   compactLine,
   displayWidth,
@@ -12,10 +15,13 @@ import {
   formatElapsed,
   formatTokens,
   fullRowCount,
+  mascotLayout,
   splitSections,
   statusLine,
   statusText,
 } from '../hooks/layout'
+import type { MascotSize, MascotState } from '../hooks/mascot'
+import { mascotRaster } from '../hooks/mascot'
 import type { AgentRow, Batch } from '../types'
 
 // 27k tokens、ctx 3%（Opus 5.5 的 context 上限是 1,000,000）
@@ -23,7 +29,7 @@ const USAGE = { input_tokens: 1000, output_tokens: 500, cache_read_input_tokens:
 const row = (patch: Partial<AgentRow> = {}): AgentRow => ({
   id: 'a', description: 'Review the whole kit', isNested: false, status: 'running', startedAt: 0, endedAt: null,
   failureReason: null, model: 'claude-opus-5-5', effort: 'xhigh', toolCount: 12, activity: '讀取 src/app.ts',
-  activityStartedAt: 0, lastUsage: USAGE, reportedTokens: null, agentType: 'Explore', agentName: null, ...patch,
+  activityStartedAt: 0, lastUsage: USAGE, reportedTokens: null, agentType: 'Explore', agentName: null, look: 0, ...patch,
 })
 const batchOf = (...agents: AgentRow[]): Batch => ({ turnId: 't', agents })
 const text = (line: Span[]) => line.map(s => s.text).join('')
@@ -205,4 +211,45 @@ test('卡片實際列數與 fullRowCount 用的一致', () => {
   expect(rowsOf(agentCard(row(), options))).toBe(5)
   expect(rowsOf(agentCard(row({ status: 'failed', failureReason: '已中斷', endedAt: 9000 }), options))).toBe(3)
   expect(rowsOf(agentCard(row({ status: 'done', endedAt: 9000 }), options))).toBe(2)
+})
+
+test('小人的版面：扣掉小人 7 欄與間隔 1 欄，文字還有 24 欄才畫，不然寬度全留給文字', () => {
+  expect([MASCOT_GAP, MIN_TEXT_COLUMNS_WITH_MASCOT]).toEqual([1, 24])
+  expect(mascotLayout(42)).toEqual({ withMascot: true, textColumns: 34 })
+  expect(mascotLayout(32)).toEqual({ withMascot: true, textColumns: 24 })
+  expect(mascotLayout(31)).toEqual({ withMascot: false, textColumns: 31 })
+  expect(mascotLayout(20)).toEqual({ withMascot: false, textColumns: 20 })
+})
+
+test('小人：執行中畫大的（7×4）、完成與失敗畫小的（7×2），造型取 look，動畫拍數照傳', () => {
+  const picture = (look: number, size: MascotSize, state: MascotState, frame: number) => mascotRaster({ look, size, state, frame })
+  const options = { now: 2000, frame: 3 }
+  const running = agentMascot(row({ look: 2 }), options)
+  expect([running.columns, running.rows]).toEqual([7, 4])
+  expect(running).toEqual(picture(2, 'large', 'running', 3))
+  const done = agentMascot(row({ look: 5, status: 'done', endedAt: 1000 }), options)
+  expect([done.columns, done.rows]).toEqual([7, 2])
+  expect(done).toEqual(picture(5, 'small', 'done', 3))
+  const failed = agentMascot(row({ look: 1, status: 'failed', failureReason: '已中斷', endedAt: 1000 }), options)
+  expect([failed.columns, failed.rows]).toEqual([7, 2])
+  expect(failed).toEqual(picture(1, 'small', 'failed', 3))
+})
+
+test('小人：卡住（沿用卡片的卡住判斷）時停下變黃，還沒卡住照常走路', () => {
+  const toolStep = (stepMs: number) => agentMascot(row({ look: 3, activityStartedAt: 10_000 }), { now: 10_000 + stepMs, frame: 3 })
+  expect(toolStep(179_999)).toEqual(mascotRaster({ look: 3, size: 'large', state: 'running', frame: 3 }))
+  expect(toolStep(180_001)).toEqual(mascotRaster({ look: 3, size: 'large', state: 'stalled', frame: 3 }))
+  const thinking = (stepMs: number) => agentMascot(row({ activity: '思考中', activityStartedAt: 0 }), { now: stepMs, frame: 0 })
+  expect(thinking(200_000).cells).toBe(mascotRaster({ look: 0, size: 'large', state: 'running', frame: 0 }).cells)
+  expect(thinking(300_001).cells).toBe(mascotRaster({ look: 0, size: 'large', state: 'stalled', frame: 0 }).cells)
+})
+
+test('小人：舊版存下、沒有 look 的列不丟例外，畫成第一種造型', () => {
+  const options = { now: 2000, frame: 3 }
+  const patches: Partial<AgentRow>[] = [{}, { status: 'done', endedAt: 1000 }, { status: 'failed', failureReason: '已中斷', endedAt: 1000 }]
+  for (const patch of patches) {
+    const { look: _look, ...legacy } = row({ ...patch, look: 4 })
+    expect(() => agentMascot(legacy as AgentRow, options)).not.toThrow()
+    expect(agentMascot(legacy as AgentRow, options)).toEqual(agentMascot(row({ ...patch, look: 0 }), options))
+  }
 })

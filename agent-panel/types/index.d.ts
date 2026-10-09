@@ -35,6 +35,8 @@ export type AgentRow = {
   lastUsage: TokenUsage | null
   // 前景子代理完成時 Agent 工具結果的 totalTokens；有值時以它為準
   reportedTokens: number | null
+  // 卡片左邊小人的造型編號（hooks/mascot.ts 取餘數）。舊版存下的列沒有這個欄位，讀的時候經過 agentLook
+  look: number
 }
 
 // 這一回合派出的子代理

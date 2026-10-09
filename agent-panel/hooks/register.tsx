@@ -3,9 +3,21 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer, ToolCallInput } from 'claude-code'
 
-import type { Batch, TokenUsage } from '../types'
+import type { AgentRow, Batch, TokenUsage } from '../types'
 import { addAgent, finishAgent, hasRunning, recordReported, recordStep, recordThinking, recordToolCall, seedRunning } from './batch'
-import { agentCard, colorRuns, compactLine, describeTool, fullRowCount, splitSections, statusLine, statusText } from './layout'
+import {
+  MASCOT_GAP,
+  agentCard,
+  agentMascot,
+  colorRuns,
+  compactLine,
+  describeTool,
+  fullRowCount,
+  mascotLayout,
+  splitSections,
+  statusLine,
+  statusText,
+} from './layout'
 import type { Span } from './layout'
 
 const PANE_ID = 'agent-panel'
@@ -305,7 +317,10 @@ export const register: Register = on => {
 
   // 面板：第一列是狀態列，下面依 Running → Failed → Done 分組畫卡片，或精簡模式一個子代理一列；版面規則都在 layout.ts
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
+    const elements = $.ui.resolve(e)
+    const { Box, Text } = elements
+    // Raster 只有終端機畫得出來：其他介面的 resolve 照樣給，但畫成空的 fragment，所以看 surface，不畫小人、寬度留給文字
+    const Raster = e.surface === 'terminal' && 'Raster' in elements ? elements.Raster : undefined
     // 一列畫成一個 Text，各段顏色是裡面的 Text；放不下就截斷，折行會讓列數跟 fullRowCount 對不上
     const spanRow = (spans: Span[]) => (
       <Text wrap="truncate-end">
@@ -335,6 +350,25 @@ export const register: Register = on => {
       const { running, failed, done } = splitSections(batch)
       // 放在輸入框上方時會擠掉對話的空間；完整模式要捲動才看得完時，也改成一個子代理一列
       const isCompact = e.props.placement === 'inline' || fullRowCount(batch) > e.props.scroll.bodyRows
+      // 小人只畫在完整模式，而且面板要夠寬、拿得到 Raster；不畫時卡片照舊用整個寬度
+      const { withMascot, textColumns } = mascotLayout(columns)
+      const MascotRaster = !isCompact && withMascot ? Raster : undefined
+      const cardOptions = { ...options, columns: MascotRaster === undefined ? columns : textColumns }
+      const cardRows = (agent: AgentRow) => {
+        const card = agentCard(agent, cardOptions)
+        return [...card.lines.map(spanRow), ...(card.bar.length > 0 ? [barRow(card.bar)] : [])]
+      }
+      // 小人在左、隔一欄接卡片；小人不比卡片高（見 agentMascot），畫面列數仍跟 fullRowCount 一致
+      const cardView = (agent: AgentRow) => {
+        if (MascotRaster === undefined) return cardRows(agent)
+        const mascot = agentMascot(agent, { now, frame })
+        return [
+          <Box flexDirection="row" columnGap={MASCOT_GAP}>
+            <MascotRaster key={`mascot-${agent.id}`} columns={mascot.columns} rows={mascot.rows} cells={mascot.cells} />
+            <Box flexDirection="column">{cardRows(agent)}</Box>
+          </Box>,
+        ]
+      }
 
       const groups = [
         { label: 'Running', agents: running },
@@ -347,10 +381,7 @@ export const register: Register = on => {
             // 組與組之間空一列（放一個空白字元）
             ...(index > 0 ? [<Text> </Text>] : []),
             <Text dimColor>{group.label}</Text>,
-            ...group.agents.flatMap(agent => {
-              const card = agentCard(agent, options)
-              return [...card.lines.map(spanRow), ...(card.bar.length > 0 ? [barRow(card.bar)] : [])]
-            }),
+            ...group.agents.flatMap(cardView),
           ])
 
       return (
