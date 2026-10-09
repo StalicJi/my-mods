@@ -1,9 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { contextPercent, modelInfo, promptTokens, requestCostUsd, totalTokens } from '../hooks/pricing'
-
-// 測試工具沒有 toBeCloseTo：金額四捨五入到小數 6 位再比對
-const dollars = (value: number | null) => (value === null ? null : Math.round(value * 1e6) / 1e6)
+import { contextPercent, modelInfo, promptTokens, totalTokens } from '../hooks/pricing'
 
 test('模型 id 的各種寫法都對到同一個 key 與顯示名稱', () => {
   for (const id of ['claude-opus-5-5', 'anthropic.claude-opus-5-5', 'claude-opus-5-5[1m]'])
@@ -15,17 +12,16 @@ test('模型 id 的各種寫法都對到同一個 key 與顯示名稱', () => {
   expect(modelInfo('gpt-x')).toEqual({ key: null, name: 'gpt-x', family: 'unknown', contextWindow: null })
 })
 
-test('單次請求的費用依四種 token 各自的單價', () => {
-  const usage = { input_tokens: 1000, output_tokens: 2000, cache_read_input_tokens: 10_000, cache_creation_input_tokens: 5000 }
-  expect(dollars(requestCostUsd('claude-opus-5-5', usage))).toBe(0.071)
-  expect(requestCostUsd('claude-opus-4-5', usage)).toBeNull()
-})
-
-test('Haiku 5.5 提示超過 100,000 token 改用高價', () => {
-  const small = { input_tokens: 50_000, output_tokens: 1000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
-  const large = { ...small, input_tokens: 150_000 }
-  expect(dollars(requestCostUsd('claude-haiku-5-5', small))).toBe(0.0055)
-  expect(dollars(requestCostUsd('claude-haiku-5-5', large))).toBe(0.0775)
+test('context 上限表：列在表上的才有 key；haiku-4-5 是 200,000，其餘 1,000,000', () => {
+  const millionKeys = [
+    'fable-5-1', 'mythos-5-1', 'fable-5', 'mythos-5',
+    'opus-5-5', 'opus-5', 'opus-4-8', 'opus-4-7', 'opus-4-6',
+    'sonnet-5-5', 'sonnet-5', 'sonnet-4-6', 'haiku-5-5',
+  ]
+  for (const key of millionKeys) expect(modelInfo(`claude-${key}`)).toMatchObject({ key, contextWindow: 1_000_000 })
+  expect(modelInfo('claude-haiku-4-5')).toMatchObject({ key: 'haiku-4-5', contextWindow: 200_000 })
+  // 認得系列與版本、但不在表上：有顯示名稱，沒有 key 與上限
+  expect(modelInfo('claude-sonnet-4-5')).toEqual({ key: null, name: 'Sonnet 4.5', family: 'sonnet', contextWindow: null })
 })
 
 test('ctx % 以提示 token 除以 context 上限', () => {
@@ -34,6 +30,7 @@ test('ctx % 以提示 token 除以 context 上限', () => {
   expect(totalTokens(usage)).toBe(30_500)
   expect(contextPercent('claude-opus-5-5', usage)).toBe(3)
   expect(contextPercent('claude-haiku-4-5', { ...usage, cache_read_input_tokens: 45_000 })).toBe(25)
+  expect(contextPercent('claude-opus-4-5', usage)).toBeNull()
   expect(contextPercent('gpt-x', usage)).toBeNull()
 })
 
@@ -42,6 +39,4 @@ test('Bedrock 跨區域前綴與版本後綴的寫法也對到同一個 key', ()
   expect(modelInfo('global.anthropic.claude-sonnet-4-6-20251001-v1:0')).toMatchObject({ key: 'sonnet-4-6', name: 'Sonnet 4.6' })
   expect(modelInfo('eu.anthropic.claude-haiku-4-5-20251001-v1:0')).toMatchObject({ key: 'haiku-4-5', contextWindow: 200_000 })
   expect(modelInfo('apac.anthropic.claude-opus-5-5')).toMatchObject({ key: 'opus-5-5' })
-  const usage = { input_tokens: 1000, output_tokens: 2000, cache_read_input_tokens: 10_000, cache_creation_input_tokens: 5000 }
-  expect(requestCostUsd('us.anthropic.claude-opus-4-6-v1:0', usage)).not.toBeNull()
 })

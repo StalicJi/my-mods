@@ -11,6 +11,12 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
   const control = {
     opens: [] as any[], closes: [] as any[], toasts: [] as unknown[], isPlaced: true,
     spawnReplies: [] as SpawnReply[], spawned: 0, state: stateStore(on, initialState),
+    // $.ui.status 每次送出的文字（undefined 是清掉）
+    statuses: [] as (string | undefined)[],
+    // $.agent.list() 回傳的清單
+    listed: [] as object[],
+    // 子代理的請求送到 engine 時（還沒有結果）的批次
+    batchAtStep: null as any,
     // 代替 host 的窗格清單：開了就列出，關了就移除
     panes: [] as { id: string; title: string; isShown: boolean; isFocused: boolean; isPlaced: boolean }[],
     clock: mock.clock(on),
@@ -28,6 +34,7 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
   on('turn.complete', () => ({ text: '' }))
   on('agent.spawn', () => control.spawnReplies.shift() ?? { model: 'claude-opus-5-5', agentId: `a${++control.spawned}` })
   on('turn.step', async function* (_$: any, e: any) {
+    if (e.agentId !== undefined) control.batchAtStep = control.state.get('batch')
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: { ...USAGE, model: e.model } }
   })
   on('tool.call', (_$: any, e: any) =>
@@ -43,7 +50,11 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
     control.toasts.push(e)
     return { value: undefined }
   })
-  on('agent.list', () => ({ value: [] }))
+  on('ui.status', (_$: any, e: any) => {
+    control.statuses.push(e.text)
+    return { value: undefined }
+  })
+  on('agent.list', () => ({ value: control.listed }))
   return control
 }
 
@@ -58,6 +69,13 @@ const spawnAgent = ($: any, patch: object = {}) =>
     provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, ...patch,
   })
 
+
+// 熱重載前就存在 state 裡、還在跑的一列
+const runningRow = (id: string) => ({
+  id, description: '任務', agentType: 'general-purpose', agentName: null, isNested: false, status: 'running', startedAt: 0,
+  endedAt: null, failureReason: null, model: null, effort: null, toolCount: 0, activity: '', activityStartedAt: 0,
+  lastUsage: null, reportedTokens: null,
+})
 
 // 跑完一次請求的串流，回傳結果
 async function step($: any, agentId?: string) {
@@ -77,6 +95,16 @@ test('派出第一個子代理時開窗格，同一批第二個不重開', async
   expect(control.opens[0]).toMatchObject({ id: 'agent-panel', title: 'Agents', columns: 42 })
   expect(control.opens[0].focus).toBeUndefined()
   expect((control.state.get('batch')).agents.map((agent: any) => agent.id)).toEqual(['a1', 'a2'])
+})
+
+test('派出時記下類型與 name，沒給 name 時是 null', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($, { subagentType: 'Explore', name: 'reviewer' })
+  await spawnAgent($)
+  const [named, plain] = (control.state.get('batch')).agents
+  expect(named).toMatchObject({ agentType: 'Explore', agentName: 'reviewer' })
+  expect(plain).toMatchObject({ agentType: 'general-purpose', agentName: null })
 })
 
 test('被擋下、沒有 agentId、teammate 不加入', async ($, on) => {
@@ -117,12 +145,28 @@ test('子代理的請求記到對的列，主迴圈的請求不記', async ($, o
   expect(row).toMatchObject({ model: 'claude-opus-5-5', effort: 'xhigh', lastUsage: USAGE })
 })
 
-test('子代理的工具呼叫累加次數並更新正在做什麼', async ($, on) => {
+test('子代理送出請求時改成思考中並記下開始時間，主迴圈的請求不記', async ($, on) => {
   const control = engine(on)
   await start($)
   await spawnAgent($)
   await $.tool.call({ tool: 'Read', file_path: '/w/src/app.ts', agentId: 'a1' } as any)
-  expect((control.state.get('batch')).agents[0]).toMatchObject({ toolCount: 1, activity: '讀取 src/app.ts' })
+  await control.clock.advance(5000)
+  const before = control.state.get('batch')
+  await step($)
+  expect(control.state.get('batch')).toEqual(before)
+  await step($, 'a1')
+  // 請求送出時就改，不等結果：思考本身就是等這個請求
+  expect(control.batchAtStep.agents[0]).toMatchObject({ activity: '思考中', activityStartedAt: 5000 })
+  expect((control.state.get('batch')).agents[0]).toMatchObject({ activity: '思考中', activityStartedAt: 5000, model: 'claude-opus-5-5' })
+})
+
+test('子代理的工具呼叫累加次數、更新正在做什麼並記下開始時間', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  await control.clock.advance(3000)
+  await $.tool.call({ tool: 'Read', file_path: '/w/src/app.ts', agentId: 'a1' } as any)
+  expect((control.state.get('batch')).agents[0]).toMatchObject({ toolCount: 1, activity: '讀取 src/app.ts', activityStartedAt: 3000 })
 })
 
 test('不在這一批的 agentId（例如 Claude Code 的內部 fork）不寫 state', async ($, on) => {
@@ -231,23 +275,30 @@ test('有子代理在跑而且面板開著才跑計時器', async ($, on) => {
 })
 
 test('熱重載後 session.start 接回計時器', async ($, on) => {
-  const running = {
-    id: 'a1', description: '任務', isNested: false, status: 'running', startedAt: 0, endedAt: null, failureReason: null,
-    model: null, effort: null, toolCount: 0, activity: '', lastUsage: null, reportedTokens: null, costUsd: 0, hasUnpricedUsage: false,
-  }
-  const control = engine(on, { batch: { turnId: 't1', agents: [running] } })
+  const control = engine(on, { batch: { turnId: 't1', agents: [runningRow('a1')] } })
   control.panes = [{ id: 'agent-panel', title: 'Agents', isShown: true, isFocused: false, isPlaced: true }]
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/w' } as any)
   await control.clock.advance(600)
   expect(control.state.get('tick')).toBeGreaterThan(0)
 })
 
-test('/clear 清空批次', async ($, on) => {
+test('熱重載後從 $.agent.list() 補上的子代理，類型取清單的 type、名字是 null', async ($, on) => {
+  const control = engine(on, { batch: { turnId: 't1', agents: [runningRow('a1')] } })
+  control.listed = [{ id: 'a2', description: '補上的', status: 'running', type: 'Explore', name: 'helper' }]
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/w' } as any)
+  const added = (control.state.get('batch')).agents[1]
+  expect(added).toMatchObject({ id: 'a2', description: '補上的', agentType: 'Explore', agentName: null })
+})
+
+test('/clear 清空批次與狀態列', async ($, on) => {
   const control = engine(on)
+  control.isPlaced = false
   await start($)
   await spawnAgent($)
+  expect(control.statuses.at(-1)).toBe('Agents ●1')
   await $.session.end({ reason: 'clear' } as any)
   expect(control.state.get('batch')).toBeNull()
+  expect(control.statuses.slice(-2)).toEqual(['Agents ●1', undefined])
 })
 
 test('沒有子代理在跑時計時器自己停下，即使錯過了停止的時機', async ($, on) => {
@@ -276,4 +327,88 @@ test('面板先在背景等待、之後被放上畫面時，下一次工具呼�
   await $.tool.call({ tool: 'Read', file_path: '/w/src/app.ts', agentId: 'a1' } as any)
   await control.clock.advance(400)
   expect(control.state.get('tick')).toBeGreaterThan(0)
+  // 面板放上畫面後，輸入框下方的狀態列就多餘了
+  expect(control.statuses.slice(-2)).toEqual(['Agents ●1', undefined])
+})
+
+// 輸入框下方的狀態列：面板沒放上畫面時的保底
+
+test('熱重載後第一次同步一定送出一次，清掉可能殘留的舊狀態列', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  expect(control.statuses).toEqual([undefined])
+})
+
+test('面板沒放上畫面時，有子代理在跑就顯示狀態列，數量跟著派出與完成更新，全部結束後清掉', async ($, on) => {
+  const control = engine(on)
+  control.isPlaced = false
+  await start($)
+  await spawnAgent($)
+  expect(control.statuses.at(-1)).toBe('Agents ●1')
+  await spawnAgent($)
+  expect(control.statuses.at(-1)).toBe('Agents ●2')
+  await $.turn.complete({ reason: 'answer', answer: '好了', durationMs: 1, agentId: 'a1', turnId: 'x' } as any)
+  expect(control.statuses.at(-1)).toBe('Agents ●1 ✓1')
+  await $.turn.complete({ reason: 'aborted', answer: '', durationMs: 1, agentId: 'a2', turnId: 'y' } as any)
+  expect(control.statuses.slice(-2)).toEqual(['Agents ●1 ✓1', undefined])
+})
+
+test('面板沒放上畫面時平行派出，狀態列最後是全部的數量', async ($, on) => {
+  const control = engine(on)
+  control.isPlaced = false
+  await start($)
+  await Promise.all(Array.from({ length: 5 }, () => spawnAgent($)))
+  expect(control.statuses.at(-1)).toBe('Agents ●5')
+})
+
+test('/agents 關掉面板時有子代理在跑就顯示狀態列，再打開就清掉', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  await $.command.run({ command: 'agents', args: '' } as any)
+  expect(control.statuses.at(-1)).toBe('Agents ●1')
+  await $.command.run({ command: 'agents', args: '' } as any)
+  expect(control.statuses.slice(-2)).toEqual(['Agents ●1', undefined])
+})
+
+test('狀態列文字沒變時不重複送出', async ($, on) => {
+  const control = engine(on)
+  control.isPlaced = false
+  await start($)
+  await spawnAgent($)
+  expect(control.statuses.at(-1)).toBe('Agents ●1')
+  const sent = control.statuses.length
+  // 面板沒放上畫面時計時器不跑，每次工具呼叫都會同步一次
+  for (let i = 0; i < 3; i++) await $.tool.call({ tool: 'Read', file_path: '/w/src/app.ts', agentId: 'a1' } as any)
+  await step($, 'a1')
+  expect(control.statuses).toHaveLength(sent)
+})
+
+test('動畫的每一拍不更新狀態列；你按 ✕ 關掉面板後，下一次工具呼叫才補上', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  await control.clock.advance(400)
+  expect(control.state.get('tick')).toBeGreaterThan(0)
+  const sent = control.statuses.length
+  // 使用者按 ✕：host 把窗格關掉、從清單移除，mod 收不到事件
+  control.panes = []
+  await control.clock.advance(1000)
+  expect(control.statuses).toHaveLength(sent)
+  await $.tool.call({ tool: 'Read', file_path: '/w/src/app.ts', agentId: 'a1' } as any)
+  expect(control.statuses.at(-1)).toBe('Agents ●1')
+})
+
+test('session 結束時清掉狀態列，下一個 session 開始時再依批次補上', async ($, on) => {
+  const control = engine(on)
+  control.isPlaced = false
+  await start($)
+  await spawnAgent($)
+  expect(control.statuses.at(-1)).toBe('Agents ●1')
+  await $.session.end({ reason: 'other' } as any)
+  expect(control.statuses.slice(-2)).toEqual(['Agents ●1', undefined])
+  // 不是 /clear：批次留著
+  expect((control.state.get('batch')).agents).toHaveLength(1)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/w' } as any)
+  expect(control.statuses.at(-1)).toBe('Agents ●1')
 })

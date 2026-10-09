@@ -1,11 +1,18 @@
-// 這一回合派出的子代理：開新一批、記錄每次請求的用量、工具呼叫、完成與失敗。
+// 這一回合派出的子代理：開新一批、記錄每次請求的模型與用量、思考與工具呼叫、完成與失敗。
 // 全部是純函式，回傳新物件、不改傳入的 batch；找不到子代理時原樣回傳同一個物件
 import type { AgentRow, Batch, TokenUsage } from '../types'
-import { requestCostUsd, totalTokens } from './pricing'
+import { totalTokens } from './pricing'
 
-type SpawnFacts = { id: string; description: string; isNested: boolean; startedAt: number }
+type SpawnFacts = {
+  id: string
+  description: string
+  agentType: string
+  agentName: string | null
+  isNested: boolean
+  startedAt: number
+}
 type FinishReason = 'answer' | 'aborted' | 'error' | 'refusal'
-type ListedAgent = { id: string; description: string; status: string; parentId?: string; teammateId?: string }
+type ListedAgent = { id: string; description: string; status: string; type: string; parentId?: string; teammateId?: string }
 
 const FAILURE_REASONS: Record<Exclude<FinishReason, 'answer'>, string> = {
   aborted: '已中斷',
@@ -13,10 +20,13 @@ const FAILURE_REASONS: Record<Exclude<FinishReason, 'answer'>, string> = {
   refusal: '模型拒絕',
 }
 
+const THINKING_ACTIVITY = '思考中'
+
 // $.agent.list() 裡這一輪還沒結束、之後會收到 turn.complete 的狀態：還沒開始、正在跑、等權限或背景工作。
 // idle 是這一輪已結束、等訊息喚醒（teammate），補成 running 會一直收不到結束而卡住，所以不算
 const LIVE_STATUSES: ReadonlySet<string> = new Set(['pending', 'running', 'waiting'])
 
+// 還沒有任何動作，目前動作的開始時間先用派出時間
 function newRow(spawn: SpawnFacts): AgentRow {
   return {
     ...spawn,
@@ -27,10 +37,9 @@ function newRow(spawn: SpawnFacts): AgentRow {
     effort: null,
     toolCount: 0,
     activity: '',
+    activityStartedAt: spawn.startedAt,
     lastUsage: null,
     reportedTokens: null,
-    costUsd: 0,
-    hasUnpricedUsage: false,
   }
 }
 
@@ -64,20 +73,18 @@ export function recordStep(
 ): Batch {
   return updateAgent(batch, agentId, row => {
     const withModel = { ...row, model: step.model, effort: step.effort ?? row.effort }
-    // 請求失敗或中斷時沒有 usage：不累加，也不當成 0
+    // 請求失敗或中斷時沒有 usage：保留上一次的用量，不當成 0
     if (step.usage === null) return withModel
-    const cost = requestCostUsd(step.model, step.usage)
-    return {
-      ...withModel,
-      lastUsage: step.usage,
-      costUsd: row.costUsd + (cost ?? 0),
-      hasUnpricedUsage: row.hasUnpricedUsage || cost === null,
-    }
+    return { ...withModel, lastUsage: step.usage }
   })
 }
 
-export function recordToolCall(batch: Batch, agentId: string, activity: string): Batch {
-  return updateAgent(batch, agentId, row => ({ ...row, toolCount: row.toolCount + 1, activity }))
+export function recordThinking(batch: Batch, agentId: string, at: number): Batch {
+  return updateAgent(batch, agentId, row => ({ ...row, activity: THINKING_ACTIVITY, activityStartedAt: at }))
+}
+
+export function recordToolCall(batch: Batch, agentId: string, activity: string, at: number): Batch {
+  return updateAgent(batch, agentId, row => ({ ...row, toolCount: row.toolCount + 1, activity, activityStartedAt: at }))
 }
 
 // 前景子代理完成時 Agent 工具結果帶的總計；背景子代理的結果沒有這兩個欄位，維持即時累計
@@ -92,6 +99,7 @@ export function recordReported(batch: Batch, agentId: string, reported: { totalT
   }))
 }
 
+// 不清掉 activity：失敗的卡片要用它顯示停在哪一步
 export function finishAgent(batch: Batch, agentId: string, reason: FinishReason, endedAt: number): Batch {
   return updateAgent(batch, agentId, row =>
     reason === 'answer'
@@ -100,14 +108,23 @@ export function finishAgent(batch: Batch, agentId: string, reason: FinishReason,
   )
 }
 
-// 熱重載或面板開啟前就在跑的子代理：用 $.agent.list() 補上，用量從之後的請求開始累計
-// teammate 跟派出時一樣不列入面板
+// 熱重載或面板開啟前就在跑的子代理：用 $.agent.list() 補上，用量從之後的請求開始累計。
+// 清單沒有 Agent({ name }) 給的名字，所以 agentName 一律 null；teammate 跟派出時一樣不列入面板
 export function seedRunning(batch: Batch | null, listed: readonly ListedAgent[], now: number): Batch | null {
   if (batch === null) return null
   const known = new Set(batch.agents.map(agent => agent.id))
   const added = listed
     .filter(agent => agent.teammateId === undefined && LIVE_STATUSES.has(agent.status) && !known.has(agent.id))
-    .map(agent => newRow({ id: agent.id, description: agent.description, isNested: agent.parentId !== undefined, startedAt: now }))
+    .map(agent =>
+      newRow({
+        id: agent.id,
+        description: agent.description,
+        agentType: agent.type,
+        agentName: null,
+        isNested: agent.parentId !== undefined,
+        startedAt: now,
+      }),
+    )
   return added.length === 0 ? batch : { ...batch, agents: [...batch.agents, ...added] }
 }
 
@@ -121,13 +138,11 @@ export function agentTokens(row: AgentRow): number {
 }
 
 // 時間從最早派出到最晚結束；還有在跑就算到現在
-export function batchTotals(batch: Batch, now: number): { costUsd: number; hasUnpriced: boolean; tokens: number; elapsedMs: number } {
+export function batchTotals(batch: Batch, now: number): { tokens: number; elapsedMs: number } {
   const { agents } = batch
-  const costUsd = agents.reduce((sum, agent) => sum + agent.costUsd, 0)
-  const hasUnpriced = agents.some(agent => agent.hasUnpricedUsage)
   const tokens = agents.reduce((sum, agent) => sum + agentTokens(agent), 0)
-  if (agents.length === 0) return { costUsd, hasUnpriced, tokens, elapsedMs: 0 }
+  if (agents.length === 0) return { tokens, elapsedMs: 0 }
   const startedAt = Math.min(...agents.map(agent => agent.startedAt))
   const endedAt = hasRunning(batch) ? now : Math.max(...agents.map(agent => agent.endedAt ?? now))
-  return { costUsd, hasUnpriced, tokens, elapsedMs: Math.max(0, endedAt - startedAt) }
+  return { tokens, elapsedMs: Math.max(0, endedAt - startedAt) }
 }

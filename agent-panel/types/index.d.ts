@@ -12,6 +12,10 @@ export type AgentStatus = 'running' | 'done' | 'failed'
 export type AgentRow = {
   id: string
   description: string
+  // 派出時的 subagentType；熱重載補上的取 $.agent.list() 的 type
+  agentType: string
+  // Agent({ name }) 給的名字，沒給就是 null；熱重載補上的一律 null
+  agentName: string | null
   // 由子代理再派出的
   isNested: boolean
   status: AgentStatus
@@ -23,16 +27,14 @@ export type AgentRow = {
   model: string | null
   effort: string | number | null
   toolCount: number
-  // 正在做什麼，例如「讀取 src/app.ts」
+  // 正在做什麼，例如「讀取 src/app.ts」、「思考中」
   activity: string
+  // 目前這個動作（思考或某個工具）開始的時間
+  activityStartedAt: number
   // 最後一次請求的 4 種 token 數
   lastUsage: TokenUsage | null
   // 前景子代理完成時 Agent 工具結果的 totalTokens；有值時以它為準
   reportedTokens: number | null
-  // 已知單價的請求累計
-  costUsd: number
-  // 有請求的模型不在價目表
-  hasUnpricedUsage: boolean
 }
 
 // 這一回合派出的子代理

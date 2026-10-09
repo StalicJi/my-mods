@@ -1,15 +1,22 @@
-// 面板的版面：把一個子代理變成每一列的文字、顏色與進度條格子，以及時間、token 的格式。
+// 面板的版面：狀態列、子代理卡片、精簡模式的單列，以及時間、token 的格式。
 // displayWidth、fitToWidth、colorRuns、cometColor、describeTool 照搬自 clean-view/hooks/register.tsx
 // （mod 之間不能共用程式碼），改那邊的用字或配色時這裡要一起改
 import type { AgentRow, Batch } from '../types'
-import { agentTokens } from './batch'
+import { agentTokens, batchTotals } from './batch'
 import { contextPercent, modelInfo } from './pricing'
 import type { ModelFamily } from './pricing'
 
 export type Span = { text: string; color?: string; isDim?: boolean; isBold?: boolean }
 
-// lines 是進度條以外的每一列；bar 是進度條每一格的顏色
+// lines 是進度條以外的每一列；bar 是進度條每一格的顏色，完成與失敗的卡片沒有進度條（空陣列）
 export type Card = { lines: Span[][]; bar: string[] }
+
+type AgentStatus = AgentRow['status']
+type LineOptions = { columns: number; now: number; frame: number }
+
+// 這一步做太久就提醒使用者可能卡住了；思考本來就比工具慢，門檻放寬
+export const STALL_THINKING_MS = 300_000
+export const STALL_TOOL_MS = 180_000
 
 const ORANGE = '#f79a4f'
 const PINK = '#ec4f8f'
@@ -17,16 +24,32 @@ const PURPLE = '#b45ce6'
 const BLUE = '#6f7df2'
 const GREEN = '#46b06e'
 const GRAY = '#8a8a94'
+const YELLOW = '#e5c07b'
 const TRACK_COLOR = '#4a4a52'
 const ACCENT_COLORS = [ORANGE, PINK, PURPLE, BLUE]
 const FAMILY_COLORS: Record<ModelFamily, string> = { opus: ORANGE, sonnet: BLUE, haiku: GREEN, fable: PURPLE, unknown: GRAY }
 
+const STATUS_LABEL = 'Agents'
+// 狀態列的數量：執行中用固定的粉紅，不跟著彗星換色
+const STATUS_COUNTS: { status: AgentStatus; mark: string; color: string }[] = [
+  { status: 'running', mark: '●', color: PINK },
+  { status: 'done', mark: '✓', color: 'success' },
+  { status: 'failed', mark: '✗', color: 'error' },
+]
+// 每張卡片在完整模式佔幾列（執行中含進度條）；要跟 agentCard 畫出來的一致
+const CARD_ROWS: Record<AgentStatus, number> = { running: 5, failed: 3, done: 2 }
+const STATUS_LINE_ROWS = 1
+
+const THINKING = '思考中'
 const INDENT = '  '
+const SEPARATOR = ' · '
+// 精簡模式裡描述與動作之間的空白
+const ACTION_GAP = '  '
+// 靠右的耗時跟左邊至少隔一格
+const MIN_GAP = 1
 // 彗星：頭最亮，後面四格一格比一格淡，融進底色
 const COMET_FADE = [1, 0.7, 0.45, 0.25, 0.1]
 const COMET_COLOR_HALF_PERIOD_FRAMES = 15 // 從橘變到藍約 3 秒（每拍 0.2 秒）
-// 面板內寬窄於這個欄數時，兩格統計放不下，改成一行
-const TILES_MIN_COLUMNS = 36
 
 export function formatElapsed(ms: number): string {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000))
@@ -43,64 +66,155 @@ export function formatTokens(count: number): string {
   return `${(count / 1_000_000).toFixed(1)}M`
 }
 
-export function summaryMode(columns: number): 'tiles' | 'line' {
-  return columns < TILES_MIN_COLUMNS ? 'line' : 'tiles'
+// 面板最上面一列：Agents、各狀態數量（0 的不列），整批耗時靠右
+export function statusLine(batch: Batch, now: number, columns: number): Span[] {
+  const counts = statusCounts(batch)
+  const left: Span[] = [{ text: STATUS_LABEL, isBold: true }, ...(counts.length > 0 ? [{ text: '  ' }, ...joinSpans(counts, ' ')] : [])]
+  return justify(left, [{ text: formatElapsed(batchTotals(batch, now).elapsedMs) }], columns)
 }
 
-// 失敗的也放在 Finished；各組維持派出順序
-export function splitSections(batch: Batch): { running: AgentRow[]; finished: AgentRow[] } {
+// 給 $.ui.status 的純文字，例如「Agents ●2 ✓1 ✗1」
+export function statusText(batch: Batch): string {
+  return [STATUS_LABEL, ...statusCounts(batch).map(span => span.text)].join(' ')
+}
+
+function statusCounts(batch: Batch): Span[] {
+  return STATUS_COUNTS.flatMap(({ status, mark, color }) => {
+    const count = batch.agents.filter(agent => agent.status === status).length
+    return count === 0 ? [] : [{ text: `${mark}${count}`, color }]
+  })
+}
+
+// 各組維持派出順序
+export function splitSections(batch: Batch): { running: AgentRow[]; failed: AgentRow[]; done: AgentRow[] } {
+  const withStatus = (status: AgentStatus) => batch.agents.filter(agent => agent.status === status)
+  return { running: withStatus('running'), failed: withStatus('failed'), done: withStatus('done') }
+}
+
+// 完整模式要幾列：狀態列，加上每個非空的組（組標題＋卡片），組與組之間空一列。
+// register.tsx 拿它跟面板可用列數比，放不下就改用 compactLine 一個子代理一列
+export function fullRowCount(batch: Batch): number {
+  const groupCount = Object.values(splitSections(batch)).filter(group => group.length > 0).length
+  const cardRows = batch.agents.reduce((sum, agent) => sum + CARD_ROWS[agent.status], 0)
+  return STATUS_LINE_ROWS + groupCount + cardRows + Math.max(0, groupCount - 1)
+}
+
+// 執行中 4 列＋進度條；完成 2 列、失敗 3 列，都不畫進度條
+export function agentCard(row: AgentRow, options: LineOptions): Card {
+  const { columns } = options
+  const title = titleLine(row, options)
+  if (row.status === 'running') return runningCard(row, options, title)
+  if (row.status === 'done') {
+    return { lines: [title, modelLine(row, [...effortParts(row), toolsText(row), formatTokens(agentTokens(row))], columns)], bar: [] }
+  }
+  // 失敗：第二列寫失敗原因與停在哪一步
+  const failure = [row.failureReason ?? '', row.activity].filter(part => part !== '').join(SEPARATOR)
   return {
-    running: batch.agents.filter(agent => agent.status === 'running'),
-    finished: batch.agents.filter(agent => agent.status !== 'running'),
+    lines: [title, fitLine([{ text: INDENT }, { text: failure, color: 'error' }], columns), modelLine(row, [toolsText(row)], columns)],
+    bar: [],
   }
 }
 
-export function agentCard(row: AgentRow, options: { columns: number; now: number; frame: number }): Card {
+function runningCard(row: AgentRow, options: LineOptions, title: Span[]): Card {
   const { columns, now, frame } = options
-  const barWidth = Math.max(0, columns - INDENT.length)
-  const lines = [titleLine(row, frame), modelLine(row)]
-  if (row.status === 'running') lines.push([{ text: INDENT }, { text: row.activity || '思考中', isDim: true }])
-  if (row.status === 'failed') lines.push([{ text: INDENT }, { text: row.failureReason ?? '', color: 'error' }])
-  lines.push(usageLine(row, now))
-  return { lines: lines.map(line => fitLine(line, columns)), bar: cardBar(row, barWidth, frame) }
+  const stalled = isStalled(row, now)
+  const percent = row.model !== null && row.lastUsage !== null ? contextPercent(row.model, row.lastUsage) : null
+  const usage = [...(percent === null ? [] : [`ctx ${percent}%`]), formatTokens(agentTokens(row))].join(SEPARATOR)
+  return {
+    lines: [
+      title,
+      modelLine(row, [...effortParts(row), toolsText(row)], columns),
+      activityLine(row, now, columns, stalled),
+      fitLine([{ text: INDENT }, { text: usage, isDim: true }], columns),
+    ],
+    bar: runningBar(Math.max(0, columns - INDENT.length), frame, stalled),
+  }
 }
 
-function titleLine(row: AgentRow, frame: number): Span[] {
-  const isRunning = row.status === 'running'
-  const mark: Span =
-    row.status === 'running'
-      ? { text: '● ', color: cometColor(frame), isBold: true }
-      : row.status === 'done'
-        ? { text: '✓ ', color: 'success' }
-        : { text: '✗ ', color: 'error' }
-  return [mark, { text: `${row.isNested ? '↳ ' : ''}${row.description}`, isBold: isRunning }]
+// 精簡模式：一個子代理一列，放不下先截描述、再截動作，耗時最後才截
+export function compactLine(row: AgentRow, options: LineOptions): Span[] {
+  const title = titleSpans(row, options.frame)
+  const descriptionIndex = title.length - 1
+  const action = compactAction(row, options.now)
+  if (action === null) return justify(title, [elapsedSpan(row, options.now)], options.columns, [descriptionIndex])
+  const line = [...title, { text: ACTION_GAP }, action]
+  return justify(line, [elapsedSpan(row, options.now)], options.columns, [descriptionIndex, line.length - 1])
 }
 
-function modelLine(row: AgentRow): Span[] {
+// 執行中寫正在做什麼（卡住變黃）、失敗寫原因、完成不寫
+function compactAction(row: AgentRow, now: number): Span | null {
+  if (row.status === 'done') return null
+  if (row.status === 'failed') return { text: row.failureReason ?? '', color: 'error' }
+  return { text: activityText(row), ...activityStyle(isStalled(row, now)) }
+}
+
+function titleLine(row: AgentRow, options: LineOptions): Span[] {
+  const title = titleSpans(row, options.frame)
+  return justify(title, [elapsedSpan(row, options.now)], options.columns, [title.length - 1])
+}
+
+// 狀態符號、巢狀箭頭、類型（有 name 用 name）· 描述；描述一定在最後一段，放不下時先截它
+function titleSpans(row: AgentRow, frame: number): Span[] {
+  const label = row.agentName ?? row.agentType
+  return [
+    statusMark(row.status, frame),
+    ...(row.isNested ? [{ text: '↳ ', isDim: true }] : []),
+    ...(label ? [{ text: label, isDim: true }, { text: SEPARATOR, isDim: true }] : []),
+    { text: row.description, isBold: row.status === 'running' },
+  ]
+}
+
+function statusMark(status: AgentStatus, frame: number): Span {
+  if (status === 'running') return { text: '● ', color: cometColor(frame), isBold: true }
+  if (status === 'done') return { text: '✓ ', color: 'success' }
+  return { text: '✗ ', color: 'error' }
+}
+
+function elapsedSpan(row: AgentRow, now: number): Span {
+  return { text: formatElapsed((row.endedAt ?? now) - row.startedAt), isDim: true }
+}
+
+// 縮排、模型名（系列色），後面接暗色的細節，例如「 · xhigh · 12 tools」
+function modelLine(row: AgentRow, details: string[], columns: number): Span[] {
   const model = row.model === null ? null : modelInfo(row.model)
   const name: Span = model === null ? { text: 'starting', isDim: true } : { text: model.name, color: FAMILY_COLORS[model.family] }
-  const effort = row.effort === null ? '' : ` · ${row.effort}`
-  return [{ text: INDENT }, name, { text: `${effort} · ${row.toolCount} tools`, isDim: true }]
+  return fitLine([{ text: INDENT }, name, { text: details.map(detail => `${SEPARATOR}${detail}`).join(''), isDim: true }], columns)
 }
 
-function usageLine(row: AgentRow, now: number): Span[] {
-  const percent = row.model !== null && row.lastUsage !== null ? contextPercent(row.model, row.lastUsage) : null
-  const parts = [
-    ...(percent === null ? [] : [`ctx ${percent}%`]),
-    formatTokens(agentTokens(row)),
-    formatElapsed((row.endedAt ?? now) - row.startedAt),
-  ]
-  return [{ text: INDENT }, { text: parts.join(' · '), isDim: true }]
+function effortParts(row: AgentRow): string[] {
+  return row.effort === null ? [] : [String(row.effort)]
 }
 
-function cardBar(row: AgentRow, width: number, frame: number): string[] {
+function toolsText(row: AgentRow): string {
+  return `${row.toolCount} tools`
+}
+
+// 正在做什麼與這一步的耗時；卡住時整列變 warning
+function activityLine(row: AgentRow, now: number, columns: number, stalled: boolean): Span[] {
+  const style = activityStyle(stalled)
+  const left = [{ text: INDENT, ...style }, { text: activityText(row), ...style }]
+  return justify(left, [{ text: formatElapsed(now - row.activityStartedAt), ...style }], columns, [1])
+}
+
+function activityText(row: AgentRow): string {
+  return row.activity || THINKING
+}
+
+function activityStyle(stalled: boolean): Pick<Span, 'color' | 'isDim'> {
+  return stalled ? { color: 'warning' } : { isDim: true }
+}
+
+// 這一步做太久：思考超過 5 分鐘、工具超過 3 分鐘。還沒用過工具（activity 空）畫面上寫思考中，也照思考算
+function isStalled(row: AgentRow, now: number): boolean {
+  const limit = activityText(row) === THINKING ? STALL_THINKING_MS : STALL_TOOL_MS
+  return now - row.activityStartedAt > limit
+}
+
+function runningBar(width: number, frame: number, stalled: boolean): string[] {
   const positions = Array.from({ length: width }, (_, index) => index)
-  if (row.status === 'failed') return positions.map(() => GRAY)
-  if (row.status === 'done') {
-    const family = row.model === null ? 'unknown' : modelInfo(row.model).family
-    return positions.map(() => FAMILY_COLORS[family])
-  }
-  // 執行中：一顆彗星從左往右走，尾巴也離開右邊後再從左邊進來，frame 每拍加一
+  // 卡住：整條靜止的黃色，不畫彗星
+  if (stalled) return positions.map(() => YELLOW)
+  // 一顆彗星從左往右走，尾巴也離開右邊後再從左邊進來，frame 每拍加一
   const head = frame % (width + COMET_FADE.length)
   const headColor = cometColor(frame)
   return positions.map(index => {
@@ -109,7 +223,37 @@ function cardBar(row: AgentRow, width: number, frame: number): string[] {
   })
 }
 
-// 一列超過寬度時從尾端截斷：名稱、正在做什麼可能很長，模型與用量列在很窄的面板也可能放不下
+function joinSpans(spans: Span[], separator: string): Span[] {
+  return spans.flatMap((span, index) => (index === 0 ? [span] : [{ text: separator }, span]))
+}
+
+function lineWidth(spans: Span[]): number {
+  return spans.reduce((sum, span) => sum + displayWidth(span.text), 0)
+}
+
+// 左右兩段排成剛好 columns 寬的一列：右段靠右、中間補空白。
+// 放不下時先依 shrinkOrder 縮短左段指定的段落（例如描述），都縮完還不夠再從左段尾端截；右段最後才截
+function justify(left: Span[], right: Span[], columns: number, shrinkOrder: number[] = []): Span[] {
+  const fittedRight = fitLine(right, columns)
+  const rightWidth = lineWidth(fittedRight)
+  const fittedLeft = shrinkToFit(left, Math.max(0, columns - rightWidth - MIN_GAP), shrinkOrder)
+  const padding = columns - lineWidth(fittedLeft) - rightWidth
+  return [...fittedLeft, ...(padding > 0 ? [{ text: ' '.repeat(padding) }] : []), ...fittedRight]
+}
+
+// 依序縮短指定的段落直到放得下，縮成空字串就換下一段；全部縮完還放不下，從尾端截
+function shrinkToFit(spans: Span[], columns: number, shrinkOrder: number[]): Span[] {
+  const shrunk = spans.slice()
+  for (const index of shrinkOrder) {
+    const overflow = lineWidth(shrunk) - columns
+    if (overflow <= 0) break
+    const span = shrunk[index]!
+    shrunk[index] = { ...span, text: fitToWidth(span.text, displayWidth(span.text) - overflow) }
+  }
+  return fitLine(shrunk.filter(span => span.text !== ''), columns)
+}
+
+// 一列超過寬度時從尾端截斷：模型與用量列在很窄的面板也可能放不下
 function fitLine(spans: Span[], columns: number): Span[] {
   const fitted: Span[] = []
   let used = 0

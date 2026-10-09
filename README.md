@@ -8,7 +8,7 @@
 | `where-am-i` | 輸入框上方的進度摘要（繁體中文版，fork 自 [hamzafer/claude-code-mods](https://github.com/hamzafer)，MIT） |
 | `next-steps` | 回合結束後建議下一步（繁體中文版，fork 自 anthropics/claude-plugins-community，Apache 2.0） |
 | `gitlab-sync` | 分支跟遠端的同步狀態與還開著的張數（GitLab 的 Task、Issue 分開計數）；GitLab 與 GitHub 上自己的 issue／MR（PR）有新動態時通知，`/gitlab`、`/github` 查看 |
-| `agent-panel` | 派出子代理時跳出面板（右側或輸入框上方），顯示每個子代理的模型、用量、估算費用與時間；`/agents` 開關 |
+| `agent-panel` | 派出子代理時跳出面板（右側或輸入框上方），一眼看出每個子代理在做什麼、有沒有卡住或失敗：類型或名稱、模型、正在做什麼、token 與時間，卡住時轉黃；子代理多或放在輸入框上方時一個一列，面板放不下時輸入框下方顯示一行狀態；`/agents` 開關 |
 
 ## 在新電腦安裝
 

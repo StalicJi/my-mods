@@ -1,10 +1,12 @@
-// Agent Panel：派出子代理時跳出面板，顯示這一回合每個子代理的模型、用量與時間；/agents 開關
+// Agent Panel：派出子代理時跳出面板，顯示這一回合每個子代理在做什麼、模型、用量與時間；
+// 面板沒放上畫面時在輸入框下方釘一行狀態列；/agents 開關
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer, ToolCallInput } from 'claude-code'
 
-import type { AgentRow, Batch, TokenUsage } from '../types'
-import { addAgent, batchTotals, finishAgent, hasRunning, recordReported, recordStep, recordToolCall, seedRunning } from './batch'
-import { agentCard, colorRuns, describeTool, fitToWidth, formatElapsed, formatTokens, splitSections, summaryMode } from './layout'
+import type { Batch, TokenUsage } from '../types'
+import { addAgent, finishAgent, hasRunning, recordReported, recordStep, recordThinking, recordToolCall, seedRunning } from './batch'
+import { agentCard, colorRuns, compactLine, describeTool, fullRowCount, splitSections, statusLine, statusText } from './layout'
+import type { Span } from './layout'
 
 const PANE_ID = 'agent-panel'
 const PANE_TITLE = 'Agents'
@@ -15,23 +17,24 @@ const EMPTY_HINT = '這個 session 還沒有派出子代理'
 // 彗星移動與時間跳動：每 0.2 秒一拍
 const ANIMATION_MS = 200
 const BAR_CELL = '▆'
-const SEPARATOR = '─'
-// 統計方框左右各一格框線、一格內距
-const TILE_CHROME_COLUMNS = 4
+// 剛載入時不知道輸入框下方是什麼（熱重載前可能留著舊的狀態列），用它讓第一次同步一定送出
+const STATUS_UNKNOWN = Symbol('status-unknown')
 
 // 狀態由 host 保存，熱重載後仍在
 const batchAtom = atom({ plugin: 'agent-panel', key: 'batch' } as const, null as Batch | null)
 // 動畫計數器，只有面板讀，所以動畫只會讓面板重畫；不用 $.ui.invalidate，那會讓整個對話紀錄重跑
 const tickAtom = atom({ plugin: 'agent-panel', key: 'tick' } as const, 0)
 
-// 下面三個是模組自己的變數，熱重載後重來
+// 下面四個是模組自己的變數，熱重載後重來
 // 目前主回合的 turnId；歸零時沿用現有批次
 let currentTurnId: string | null = null
 // 窗格放不下的提示每個 session 最多一次
 let hasWarnedNarrow = false
 let timer: Timer | undefined
+// 上一次送給 $.ui.status 的文字；相同就不再送，每送一次輸入框下方就重畫一次
+let shownStatus: string | undefined | typeof STATUS_UNKNOWN = STATUS_UNKNOWN
 
-type SpawnFacts = { id: string; description: string; isNested: boolean }
+type SpawnFacts = { id: string; description: string; agentType: string; agentName: string | null; isNested: boolean }
 type FinishReason = 'answer' | 'aborted' | 'error' | 'refusal'
 
 // mod 自己開的窗格要終端機夠寬才放得下（使用者親手開過後門檻較低）；放不下時窗格在背景等，提示一次怎麼開
@@ -41,19 +44,23 @@ export async function openPanel($: EngineInterface): Promise<void> {
     hasWarnedNarrow = true
     $.ui.toast(NARROW_HINT)
   }
-  await syncTimer($)
+  await syncTimerAndStatus($)
 }
 
 // 由 mod 關閉，不會清掉「使用者親手開過」的紀錄（使用者按 ✕ 才會）
 async function closePanel($: EngineInterface) {
   await $.ui.close({ id: PANE_ID }).catch(() => {})
-  await syncTimer($)
+  await syncTimerAndStatus($)
 }
 
-// 只在面板已放上畫面、而且有子代理在跑時計時；全部完成或面板關掉就停，不在背景空轉
-export async function syncTimer($: EngineInterface): Promise<void> {
+// 有子代理在跑時：面板放上畫面就跑動畫，沒放上就在輸入框下方釘一行狀態列；都沒在跑就停計時器、清狀態列。
+// 不在動畫的每一拍呼叫，所以狀態列不放會一直跳的耗時
+export async function syncTimerAndStatus($: EngineInterface): Promise<void> {
   try {
-    if (!(await shouldAnimate($))) {
+    const { batch, isPanelPlaced } = await readPanelState($)
+    const isRunning = batch !== null && hasRunning(batch)
+    showStatus($, isRunning && !isPanelPlaced ? statusText(batch) : undefined)
+    if (!isRunning || !isPanelPlaced) {
       stopTimer()
       return
     }
@@ -63,13 +70,39 @@ export async function syncTimer($: EngineInterface): Promise<void> {
   }
 }
 
-async function shouldAnimate($: EngineInterface) {
+async function readPanelState($: EngineInterface) {
   const [batch, panes] = await Promise.all([read($, batchAtom), $.ui.panes()])
-  return hasRunning(batch) && panes.some(pane => pane.id === PANE_ID && pane.isPlaced)
+  return { batch, isPanelPlaced: isPanePlaced(panes) }
+}
+
+function isPanePlaced(panes: readonly { id: string; isPlaced: boolean }[]) {
+  return panes.some(pane => pane.id === PANE_ID && pane.isPlaced)
+}
+
+function showStatus($: EngineInterface, text: string | undefined) {
+  if (text === shownStatus) return
+  $.ui.status(text)
+  shownStatus = text
+}
+
+// session 結束後畫面上是什麼不確定，記錄回到「不知道」，下一個 session 的第一次同步一定送出
+function clearStatus($: EngineInterface) {
+  try {
+    $.ui.status(undefined)
+  } catch {
+    // 略過
+  }
+  shownStatus = STATUS_UNKNOWN
+}
+
+async function shouldAnimate($: EngineInterface) {
+  const { batch, isPanelPlaced } = await readPanelState($)
+  return isPanelPlaced && hasRunning(batch)
 }
 
 // 每一拍先確認面板還在畫面上、而且還有子代理在跑，不是就停下：
-// 使用者按 ✕ 關掉面板，或 syncTimer 的讀取競態讓計時器在全部完成後才建立，都會在下一拍自己停下
+// 使用者按 ✕ 關掉面板，或 syncTimerAndStatus 的讀取競態讓計時器在全部完成後才建立，都會在下一拍自己停下。
+// 這裡不同步狀態列：按 ✕ 之後的狀態列由下一次工具呼叫補上
 async function advanceFrame($: EngineInterface) {
   try {
     if (!(await shouldAnimate($))) {
@@ -112,7 +145,18 @@ async function recordSpawn($: EngineInterface, spawn: SpawnFacts) {
       return next
     })
     if (isNewBatch) await openPanel($)
-    else await syncTimer($)
+    else await syncTimerAndStatus($)
+  } catch {
+    // 略過
+  }
+}
+
+// 送出請求就是開始思考：在請求送出前記下，不等結果
+async function recordThinkingStart($: EngineInterface, agentId: string) {
+  try {
+    if (!(await isInBatch($, agentId))) return
+    const at = await $.clock.now()
+    await update($, batchAtom, batch => (batch === null ? batch : recordThinking(batch, agentId, at)))
   } catch {
     // 略過
   }
@@ -131,9 +175,11 @@ async function recordTool($: EngineInterface, agentId: string, call: ToolCallInp
   try {
     if (!(await isInBatch($, agentId))) return
     const activity = describeTool(call.tool, call)
-    await update($, batchAtom, batch => (batch === null ? batch : recordToolCall(batch, agentId, activity)))
-    // 面板可能先在背景等待、終端機拉寬後才放上畫面，這時沒有事件通知；趁工具呼叫補啟動動畫
-    if (timer === undefined) await syncTimer($)
+    const at = await $.clock.now()
+    await update($, batchAtom, batch => (batch === null ? batch : recordToolCall(batch, agentId, activity, at)))
+    // 面板可能先在背景等待、終端機拉寬後才放上畫面，或被使用者按 ✕ 關掉，這些都沒有事件通知；
+    // 趁工具呼叫補啟動動畫，或補上輸入框下方的狀態列
+    if (timer === undefined) await syncTimerAndStatus($)
   } catch {
     // 略過
   }
@@ -158,7 +204,7 @@ async function recordFinish($: EngineInterface, agentId: string, reason: FinishR
     if (!(await isInBatch($, agentId))) return
     const endedAt = await $.clock.now()
     await update($, batchAtom, batch => (batch === null ? batch : finishAgent(batch, agentId, reason, endedAt)))
-    await syncTimer($)
+    await syncTimerAndStatus($)
   } catch {
     // 略過
   }
@@ -181,12 +227,13 @@ export const register: Register = on => {
     // 名稱已被佔用時會被拒絕，不影響其他功能
     await $.command.register({ name: 'agents', description: '開關子代理面板' }).catch(() => {})
     await seedFromAgentList($)
-    await syncTimer($) // 熱重載時把動畫接回來
+    await syncTimerAndStatus($) // 熱重載時把動畫與狀態列接回來
     return started
   })
 
   on('session.end', async ($, e, next) => {
     stopTimer()
+    clearStatus($)
     if (e.reason === 'clear') await update($, batchAtom, () => null).catch(() => {})
     return next(e)
   })
@@ -209,13 +256,13 @@ export const register: Register = on => {
 
   on('command.run', { command: 'agents' }, async $ => {
     const panes = await $.ui.panes().catch(() => [])
-    if (panes.some(pane => pane.id === PANE_ID && pane.isPlaced)) {
+    if (isPanePlaced(panes)) {
       await closePanel($)
       return { text: '已關閉子代理面板。' }
     }
     // 使用者打指令開的窗格任何寬度都放得下，也讓之後 mod 自己開時門檻降到 110 欄
     await $.ui.open({ id: PANE_ID, title: PANE_TITLE, columns: PANE_COLUMNS })
-    await syncTimer($)
+    await syncTimerAndStatus($)
     return { text: '已開啟子代理面板。' }
   })
 
@@ -223,11 +270,18 @@ export const register: Register = on => {
     const result = await next(e)
     // 被擋下、沒有本機執行迴圈（workflow 的遠端子代理）、在其他窗格跑的 teammate：追蹤不到，不列入
     if (result.deny !== undefined || result.agentId === undefined || result.teammateId !== undefined) return result
-    await recordSpawn($, { id: result.agentId, description: e.description, isNested: e.parentAgentId !== undefined })
+    await recordSpawn($, {
+      id: result.agentId,
+      description: e.description,
+      agentType: e.subagentType,
+      agentName: e.name ?? null,
+      isNested: e.parentAgentId !== undefined,
+    })
     return result
   })
 
   on('turn.step', async function* ($, e, next) {
+    if (e.agentId !== undefined) await recordThinkingStart($, e.agentId)
     const result = yield* next(e)
     if (e.agentId !== undefined) await recordStepUsage($, e.agentId, { model: e.model, effort: e.effort, usage: result.usage })
     return result
@@ -249,9 +303,27 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // 面板：上方是這一批的總計，下面 Running、Finished 兩組卡片；版面規則都在 layout.ts
+  // 面板：第一列是狀態列，下面依 Running → Failed → Done 分組畫卡片，或精簡模式一個子代理一列；版面規則都在 layout.ts
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
+    // 一列畫成一個 Text，各段顏色是裡面的 Text；放不下就截斷，折行會讓列數跟 fullRowCount 對不上
+    const spanRow = (spans: Span[]) => (
+      <Text wrap="truncate-end">
+        {spans.map(span => (
+          <Text color={span.color} dimColor={span.isDim} bold={span.isBold}>
+            {span.text}
+          </Text>
+        ))}
+      </Text>
+    )
+    const barRow = (cells: string[]) => (
+      <Text>
+        {'  '}
+        {colorRuns(cells).map(run => (
+          <Text color={run.color}>{BAR_CELL.repeat(run.count)}</Text>
+        ))}
+      </Text>
+    )
     // 畫面丟例外時 Claude Code 會卸載窗格、要再打 /agents 才回來；這裡接住，畫一行提示
     try {
       const [batch, frame] = await Promise.all([read($, batchAtom), read($, tickAtom)])
@@ -259,65 +331,32 @@ export const register: Register = on => {
 
       const columns = e.props.bodyColumns
       const now = await $.clock.now()
-      const totals = batchTotals(batch, now)
-      const tokens = formatTokens(totals.tokens)
-      const time = formatElapsed(totals.elapsedMs)
-      const { running, finished } = splitSections(batch)
-      const lastId = [...running, ...finished].at(-1)?.id
-      const tileWidth = Math.floor(columns / 2)
-      // 值放不下時截斷，不讓格子折行變高
-      const tileValue = (value: string) => fitToWidth(value, tileWidth - TILE_CHROME_COLUMNS)
+      const options = { columns, now, frame }
+      const { running, failed, done } = splitSections(batch)
+      // 放在輸入框上方時會擠掉對話的空間；完整模式要捲動才看得完時，也改成一個子代理一列
+      const isCompact = e.props.placement === 'inline' || fullRowCount(batch) > e.props.scroll.bodyRows
 
-      const section = (title: string, agents: AgentRow[]) =>
-        agents.length > 0 && (
-          <Box flexDirection="column">
-            <Text dimColor>{`${title} · ${agents.length}`}</Text>
-            {agents.map(agent => {
-              const card = agentCard(agent, { columns, now, frame })
-              return (
-                <Box flexDirection="column">
-                  {card.lines.map(line => (
-                    <Text wrap="truncate-end">
-                      {line.map(span => (
-                        <Text color={span.color} dimColor={span.isDim} bold={span.isBold}>
-                          {span.text}
-                        </Text>
-                      ))}
-                    </Text>
-                  ))}
-                  <Text>
-                    {'  '}
-                    {colorRuns(card.bar).map(run => (
-                      <Text color={run.color}>{BAR_CELL.repeat(run.count)}</Text>
-                    ))}
-                  </Text>
-                  {agent.id !== lastId && <Text dimColor>{SEPARATOR.repeat(columns)}</Text>}
-                </Box>
-              )
-            })}
-          </Box>
-        )
+      const groups = [
+        { label: 'Running', agents: running },
+        { label: 'Failed', agents: failed },
+        { label: 'Done', agents: done },
+      ].filter(group => group.agents.length > 0)
+      const body = isCompact
+        ? [...running, ...failed, ...done].map(agent => spanRow(compactLine(agent, options)))
+        : groups.flatMap((group, index) => [
+            // 組與組之間空一列（放一個空白字元）
+            ...(index > 0 ? [<Text> </Text>] : []),
+            <Text dimColor>{group.label}</Text>,
+            ...group.agents.flatMap(agent => {
+              const card = agentCard(agent, options)
+              return [...card.lines.map(spanRow), ...(card.bar.length > 0 ? [barRow(card.bar)] : [])]
+            }),
+          ])
 
       return (
         <Box flexDirection="column">
-          <Text bold>{PANE_TITLE}</Text>
-          {summaryMode(columns) === 'tiles' ? (
-            <Box flexDirection="row">
-              {[
-                ['Tokens', tokens],
-                ['Time', time],
-              ].map(([label, value]) => (
-                <Box flexDirection="column" borderStyle="round" width={tileWidth} paddingX={1}>
-                  <Text dimColor>{label}</Text>
-                  <Text bold>{tileValue(value!)}</Text>
-                </Box>
-              ))}
-            </Box>
-          ) : (
-            <Text>{fitToWidth(`${tokens} · ${time}`, columns)}</Text>
-          )}
-          {section('Running', running)}
-          {section('Finished', finished)}
+          {spanRow(statusLine(batch, now, columns))}
+          {body}
         </Box>
       )
     } catch (error) {
