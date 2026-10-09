@@ -1,4 +1,4 @@
-// Clean View：工具呼叫收成一行淡色摘要，Claude 回報的計畫清單顯示在 prompt 上方；/clean 切換
+// Clean View：工具呼叫收成一行淡色摘要（Edit、Write、Bash 與錯誤訊息照常顯示），Claude 回報的計畫清單顯示在 prompt 上方；/clean 切換
 import { atom, read, update } from 'claude-code'
 import type { Color, EngineInterface, Register, ThemeKey, Timer } from 'claude-code'
 
@@ -9,6 +9,10 @@ const PLAN_TOOL_NAME = 'update_plan'
 // where-am-i/hooks/register.tsx 也用這個名稱略過計畫工具，改名要兩邊一起改
 const PLAN_TOOL = 'mcp__clean-view__update_plan'
 const MAX_GROUP_LINES = 5
+// 這幾個工具照 Claude Code 原本的樣子畫，看得到 diff、指令與輸出。
+// 唯讀的 Bash（ls、cat、grep…）會被 Claude Code 折進 ToolGroup，那裡照樣一行摘要
+const FULL_VIEW_TOOLS: readonly string[] = ['Edit', 'Write', 'Bash']
+const MAX_ERROR_LINES = 4
 
 // 計畫清單的排版
 const BAR_WIDTH = 12
@@ -197,7 +201,7 @@ export const register: Register = on => {
   on('command.run', { command: 'clean' }, async $ => {
     const enabled = await update($, isEnabled, value => !value)
     await refreshPlanBand($)
-    return { text: enabled ? 'Clean View 已開啟：工具呼叫收成一行摘要。' : 'Clean View 已關閉：恢復完整顯示。' }
+    return { text: enabled ? 'Clean View 已開啟：工具呼叫收成一行摘要，Edit、Write、Bash 與錯誤訊息照常顯示。' : 'Clean View 已關閉：恢復完整顯示。' }
   })
 
   // 內容固定的 session 區段，不會讓 prompt cache 每次失效；沒有這個工具的請求（例如部分 subagent）不加
@@ -260,24 +264,28 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
-    if (!(await read($, isEnabled))) return next(e)
+    if (!(await read($, isEnabled)) || FULL_VIEW_TOOLS.includes(e.props.tool)) return next(e)
     const { Box, Text } = $.ui.resolve(e)
     if (e.props.tool === PLAN_TOOL) return <Box />
-    const line = toolLine(e.props)
     return (
-      <Text color={line.color} dimColor={line.color === undefined} wrap="truncate-end">
-        {line.text}
-      </Text>
+      <Box flexDirection="column">
+        {toolLines(e.props).map(line => (
+          <Text color={line.color} dimColor={line.color === undefined} wrap="truncate-end">
+            {line.text}
+          </Text>
+        ))}
+      </Box>
     )
   })
 
+  // 錯誤內容由上面 ToolUse 那一列接在摘要下面：群組裡的呼叫沒有 ToolResult，兩邊才畫得一致
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
-    if (!(await read($, isEnabled))) return next(e)
+    if (!(await read($, isEnabled)) || FULL_VIEW_TOOLS.includes(e.props.tool)) return next(e)
     const { Box } = $.ui.resolve(e)
     return <Box />
   })
 
-  // 連續的讀檔、搜尋會被折成一組；照樣一個動作一行，太多時只留最後幾個
+  // 連續的讀檔、搜尋會被折成一組；照樣一個動作一行（出錯的下面接錯誤內容），太多時只留最後幾個
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     if (!(await read($, isEnabled))) return next(e)
     const { Box, Text } = $.ui.resolve(e)
@@ -287,14 +295,11 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         {hiddenCount > 0 && <Text dimColor>{`  · 前面還有 ${hiddenCount} 個動作`}</Text>}
-        {shown.map(call => {
-          const line = toolLine(call)
-          return (
-            <Text color={line.color} dimColor={line.color === undefined} wrap="truncate-end">
-              {line.text}
-            </Text>
-          )
-        })}
+        {shown.flatMap(toolLines).map(line => (
+          <Text color={line.color} dimColor={line.color === undefined} wrap="truncate-end">
+            {line.text}
+          </Text>
+        ))}
       </Box>
     )
   })
@@ -613,14 +618,35 @@ function displayWidth(text: string) {
   return width
 }
 
-type ToolCallView = { tool: string; input: unknown; isRunning: boolean; isErrored: boolean; isInterrupted: boolean }
+type ToolCallView = { tool: string; input: unknown; isRunning: boolean; isErrored: boolean; isInterrupted: boolean; output?: unknown }
+type ToolLine = { text: string; color?: ThemeKey }
 
-export function toolLine(call: ToolCallView): { text: string; color?: ThemeKey } {
+// 一個工具呼叫在畫面上的所有列：一行摘要，出錯時下面接錯誤內容
+export function toolLines(call: ToolCallView): ToolLine[] {
+  const errors = errorLines(call)
+  const indented = errors.map((line, index) => ({ text: `${index === 0 ? '    ⎿ ' : '      '}${line}`, color: 'error' as const }))
+  return [toolLine(call), ...indented]
+}
+
+export function toolLine(call: ToolCallView): ToolLine {
   const label = `  · ${describe(call.tool, call.input)}`
   if (call.isInterrupted) return { text: `${label}（已中斷）`, color: 'warning' }
   if (call.isErrored) return { text: `${label}（失敗）`, color: 'error' }
   if (call.isRunning) return { text: `${label} …` }
   return { text: label }
+}
+
+// 出錯時 output 是模型讀到的文字。中斷不算錯誤內容，摘要已標「（已中斷）」。
+// Bash 失敗是「Exit code N」後面接整段輸出，錯誤多半在最後，所以太長時留第一行與最後幾行
+export function errorLines(call: ToolCallView): string[] {
+  if (!call.isErrored || call.isInterrupted || typeof call.output !== 'string') return []
+  const text = call.output
+    .replace(/<\/?tool_use_error>/g, '')
+    .replace(/\x1b\[[0-9;]*m/g, '') // Python traceback 之類的輸出夾帶的 ANSI 色碼
+  const lines = text.split('\n').filter(line => line.trim() !== '')
+  if (lines.length <= MAX_ERROR_LINES) return lines
+  const tail = lines.slice(-(MAX_ERROR_LINES - 2))
+  return [lines[0]!, `…（省略 ${lines.length - 1 - tail.length} 行）`, ...tail]
 }
 
 // 一句話說出 Claude 在做什麼，取代原本的工具名稱與參數；where-am-i 的 describe 用同一套用字

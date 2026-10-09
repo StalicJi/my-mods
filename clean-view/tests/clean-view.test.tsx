@@ -5,6 +5,7 @@ import {
   colorRuns,
   cometColor,
   combinedBoxMode,
+  errorLines,
   formatElapsed,
   fitToWidth,
   overallLabel,
@@ -17,6 +18,7 @@ import {
   stepBar,
   titleRow,
   toolLine,
+  toolLines,
 } from '../hooks/register'
 
 const PLAN_TOOL = 'mcp__clean-view__update_plan'
@@ -211,6 +213,53 @@ describe('clean-view', () => {
     const planRow = await $.ui.mount({ plugin: 'clean-view', surface: 'terminal', ...PLAN_ROW } as any)
     expect(await planRow.find({ type: 'Text' })).toBeUndefined()
     await planRow.unmount()
+  })
+
+  test('Edit、Write、Bash 照原本的樣子畫，呼叫列與結果都交給 engine', async ($, on) => {
+    await start($, on)
+    for (const tool of ['Edit', 'Write', 'Bash']) {
+      for (const component of ['ToolUse', 'ToolResult']) {
+        const props = { ...READ_ROW.props, tool, input: { file_path: '/work/a.ts', command: 'npm test' }, output: { stdout: 'ok' } }
+        const row = await $.ui.mount({ plugin: 'clean-view', surface: 'terminal', component, props } as any)
+        expect(await row.find({ type: 'Text', text: /engine draws/ })).toBeDefined()
+        await row.unmount()
+      }
+    }
+    const readResult = await $.ui.mount({ plugin: 'clean-view', surface: 'terminal', component: 'ToolResult', props: { ...READ_ROW.props, output: {} } } as any)
+    expect(await readResult.find({ type: 'Text' })).toBeUndefined()
+    await readResult.unmount()
+  })
+
+  test('出錯的呼叫在摘要下面接錯誤內容，結果區塊不重複畫', async ($, on) => {
+    await start($, on)
+    const output = '<tool_use_error>File does not exist.</tool_use_error>'
+    const props = { ...READ_ROW.props, isErrored: true, output }
+    const row = await $.ui.mount({ plugin: 'clean-view', surface: 'terminal', component: 'ToolUse', props } as any)
+    expect(await row.find({ type: 'Text', text: /· 讀取 src\/config\.ts（失敗）/ })).toBeDefined()
+    expect(await row.find({ type: 'Text', text: /^ {4}⎿ File does not exist\.$/ })).toBeDefined()
+    await row.unmount()
+
+    const result = await $.ui.mount({ plugin: 'clean-view', surface: 'terminal', component: 'ToolResult', props: { ...props } } as any)
+    expect(await result.find({ type: 'Text' })).toBeUndefined()
+    await result.unmount()
+  })
+
+  test('群組裡的唯讀 Bash 維持一行摘要，出錯的那個接錯誤內容', async ($, on) => {
+    await start($, on)
+    const call = { tool_use_id: 'g1', isRunning: false, isErrored: false, isInterrupted: false }
+    const calls = [
+      { ...call, tool: 'Bash', input: { command: 'ls src', description: '列出 src' }, output: { stdout: 'a.ts' } },
+      { ...call, tool: 'Bash', input: { command: 'ls nope', description: '列出 nope' }, isErrored: true, output: 'Exit code 1\nls: nope: No such file or directory' },
+    ]
+    const group = await $.ui.mount({ plugin: 'clean-view', surface: 'terminal', component: 'ToolGroup', props: { calls, isActive: false, isExpanded: false } } as any)
+    const drawn = textOf(await group.drawn())
+    expect(drawn).toContain('· 執行：列出 src')
+    expect(drawn).toContain('· 執行：列出 nope（失敗）')
+    expect(await group.find({ type: 'Text', text: /⎿ Exit code 1$/ })).toBeDefined()
+    expect(await group.find({ type: 'Text', text: /ls: nope: No such file or directory$/ })).toBeDefined()
+    expect(drawn).not.toContain('a.ts') // 成功的唯讀指令不畫輸出
+    expect(drawn).not.toContain('engine draws')
+    await group.unmount()
   })
 
   test('/clean 關閉後工具列與合併框都恢復原樣，再打一次又開回來', async ($, on) => {
@@ -594,5 +643,22 @@ describe('clean-view 純函式', () => {
     const call = { tool: 'Bash', input: { command: 'npm test', description: '跑測試' }, isRunning: false, isInterrupted: false }
     expect(toolLine({ ...call, isErrored: true })).toEqual({ text: '  · 執行：跑測試（失敗）', color: 'error' })
     expect(toolLine({ ...call, isErrored: false, isRunning: true }).text).toBe('  · 執行：跑測試 …')
+  })
+
+  test('錯誤內容：去掉標籤與色碼，太長時留第一行與最後幾行，中斷與成功都不畫', () => {
+    const call = { tool: 'Bash', input: { command: 'npm test' }, isRunning: false, isErrored: true, isInterrupted: false }
+    expect(errorLines({ ...call, output: '<tool_use_error>File has been modified since read.</tool_use_error>' })).toEqual(['File has been modified since read.'])
+    expect(errorLines({ ...call, output: 'Exit code 1\n\x1b[1;35mStopIteration\x1b[0m' })).toEqual(['Exit code 1', 'StopIteration'])
+    const long = ['Exit code 1', 'line 1', 'line 2', 'line 3', 'line 4', '', 'Error: boom'].join('\n')
+    expect(errorLines({ ...call, output: long })).toEqual(['Exit code 1', '…（省略 3 行）', 'line 4', 'Error: boom'])
+    expect(errorLines({ ...call, isInterrupted: true, output: 'Interrupted by user' })).toEqual([])
+    expect(errorLines({ ...call, isErrored: false, output: 'fine' })).toEqual([])
+    expect(errorLines({ ...call, output: { stdout: 'x' } })).toEqual([])
+
+    expect(toolLines({ ...call, output: 'Exit code 2\nboom' })).toEqual([
+      { text: '  · 執行：npm test（失敗）', color: 'error' },
+      { text: '    ⎿ Exit code 2', color: 'error' },
+      { text: '      boom', color: 'error' },
+    ])
   })
 })

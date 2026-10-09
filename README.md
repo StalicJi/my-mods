@@ -4,7 +4,7 @@
 
 | mod | 用途 |
 | --- | --- |
-| `clean-view` | 工具呼叫收成一行淡色摘要，計畫清單顯示在輸入框上方；`/clean` 切換 |
+| `clean-view` | 工具呼叫收成一行淡色摘要（Edit、Write、Bash 與錯誤訊息照常顯示），計畫清單顯示在輸入框上方；`/clean` 切換 |
 | `where-am-i` | 輸入框上方的進度摘要（繁體中文版，fork 自 [hamzafer/claude-code-mods](https://github.com/hamzafer)，MIT） |
 | `next-steps` | 回合結束後建議下一步（繁體中文版，fork 自 anthropics/claude-plugins-community，Apache 2.0） |
 | `gitlab-sync` | 分支跟遠端的同步狀態；GitLab 與 GitHub 上自己的 issue／MR（PR）有新動態時通知，`/gitlab`、`/github` 查看 |

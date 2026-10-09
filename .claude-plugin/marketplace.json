@@ -20,7 +20,7 @@
     {
       "name": "clean-view",
       "source": "./clean-view",
-      "description": "Clean View：工具呼叫收成一行淡色摘要，計畫清單顯示在 prompt 上方；/clean 切換"
+      "description": "Clean View：工具呼叫收成一行淡色摘要（Edit、Write、Bash 與錯誤訊息照常顯示），計畫清單顯示在 prompt 上方；/clean 切換"
     },
     {
       "name": "gitlab-sync",
