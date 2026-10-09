@@ -13,6 +13,10 @@ export function stateStore(on: any, initial: Record<string, unknown> = {}) {
       return { value: { isSet: true, version: version + 1 } }
     })
   }
-  // 測試裡直接讀欄位，回傳 any 省去逐一轉型
-  return { get: (key: string): any => held.get(key)?.value ?? null }
+  return {
+    // 測試裡直接讀欄位，回傳 any 省去逐一轉型
+    get: (key: string): any => held.get(key)?.value ?? null,
+    // 模擬狀態被直接改掉（不經過 mod 的事件），版本照樣往上加
+    set: (key: string, value: unknown) => held.set(key, { value, version: (held.get(key)?.version ?? 0) + 1 }),
+  }
 }

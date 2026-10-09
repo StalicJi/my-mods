@@ -74,3 +74,12 @@ test('單行統計放不下時截斷，不折行', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /^≈\$12\.34\+\? · 27k · 0…$/ })).toBeDefined()
   await ui.unmount()
 })
+
+test('狀態資料壞掉時畫出錯誤提示，不讓面板消失', async ($, on) => {
+  mock.clock(on)
+  // 例如升級後讀到舊版存下、形狀不對的資料
+  stateStore(on, { batch: { turnId: 't1', agents: null } })
+  const ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ type: 'Text', text: /^面板暫時畫不出來/ })).toBeDefined()
+  await ui.unmount()
+})

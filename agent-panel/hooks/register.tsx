@@ -53,9 +53,7 @@ async function closePanel($: EngineInterface) {
 // 只在面板已放上畫面、而且有子代理在跑時計時；全部完成或面板關掉就停，不在背景空轉
 export async function syncTimer($: EngineInterface): Promise<void> {
   try {
-    const [batch, panes] = await Promise.all([read($, batchAtom), $.ui.panes()])
-    const isShown = panes.some(pane => pane.id === PANE_ID && pane.isPlaced)
-    if (!isShown || !hasRunning(batch)) {
+    if (!(await shouldAnimate($))) {
       stopTimer()
       return
     }
@@ -65,12 +63,16 @@ export async function syncTimer($: EngineInterface): Promise<void> {
   }
 }
 
-// 每一拍先確認面板還在畫面上：使用者按 ✕ 或用其他方式關掉面板時，計時器自己發現並停下，
-// 不必等到下一次派出或完成，也不依賴 ui.close 事件
+async function shouldAnimate($: EngineInterface) {
+  const [batch, panes] = await Promise.all([read($, batchAtom), $.ui.panes()])
+  return hasRunning(batch) && panes.some(pane => pane.id === PANE_ID && pane.isPlaced)
+}
+
+// 每一拍先確認面板還在畫面上、而且還有子代理在跑，不是就停下：
+// 使用者按 ✕ 關掉面板，或 syncTimer 的讀取競態讓計時器在全部完成後才建立，都會在下一拍自己停下
 async function advanceFrame($: EngineInterface) {
   try {
-    const panes = await $.ui.panes()
-    if (!panes.some(pane => pane.id === PANE_ID && pane.isPlaced)) {
+    if (!(await shouldAnimate($))) {
       stopTimer()
       return
     }
@@ -120,6 +122,8 @@ async function recordStepUsage($: EngineInterface, agentId: string, step: { mode
 async function recordTool($: EngineInterface, agentId: string, activity: string) {
   try {
     await update($, batchAtom, batch => (batch === null ? batch : recordToolCall(batch, agentId, activity)))
+    // 面板可能先在背景等待、終端機拉寬後才放上畫面，這時沒有事件通知；趁工具呼叫補啟動動畫
+    if (timer === undefined) await syncTimer($)
   } catch {
     // 略過
   }
@@ -231,73 +235,83 @@ export const register: Register = on => {
   // 面板：上方是這一批的總計，下面 Running、Finished 兩組卡片；版面規則都在 layout.ts
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
-    const [batch, frame] = await Promise.all([read($, batchAtom), read($, tickAtom)])
-    if (batch === null) return <Text dimColor>{EMPTY_HINT}</Text>
+    // 畫面丟例外時 Claude Code 會卸載窗格、要再打 /agents 才回來；這裡接住，畫一行提示
+    try {
+      const [batch, frame] = await Promise.all([read($, batchAtom), read($, tickAtom)])
+      if (batch === null) return <Text dimColor>{EMPTY_HINT}</Text>
 
-    const columns = e.props.bodyColumns
-    const now = await $.clock.now()
-    const totals = batchTotals(batch, now)
-    const cost = formatCost(totals.costUsd, totals.hasUnpriced)
-    const tokens = formatTokens(totals.tokens)
-    const time = formatElapsed(totals.elapsedMs)
-    const { running, finished } = splitSections(batch)
-    const lastId = [...running, ...finished].at(-1)?.id
-    const tileWidth = Math.floor(columns / 3)
-    // 值放不下時截斷，不讓格子折行變高
-    const tileValue = (value: string) => fitToWidth(value, tileWidth - TILE_CHROME_COLUMNS)
+      const columns = e.props.bodyColumns
+      const now = await $.clock.now()
+      const totals = batchTotals(batch, now)
+      const cost = formatCost(totals.costUsd, totals.hasUnpriced)
+      const tokens = formatTokens(totals.tokens)
+      const time = formatElapsed(totals.elapsedMs)
+      const { running, finished } = splitSections(batch)
+      const lastId = [...running, ...finished].at(-1)?.id
+      const tileWidth = Math.floor(columns / 3)
+      // 值放不下時截斷，不讓格子折行變高
+      const tileValue = (value: string) => fitToWidth(value, tileWidth - TILE_CHROME_COLUMNS)
 
-    const section = (title: string, agents: AgentRow[]) =>
-      agents.length > 0 && (
-        <Box flexDirection="column">
-          <Text dimColor>{`${title} · ${agents.length}`}</Text>
-          {agents.map(agent => {
-            const card = agentCard(agent, { columns, now, frame })
-            return (
-              <Box flexDirection="column">
-                {card.lines.map(line => (
-                  <Text wrap="truncate-end">
-                    {line.map(span => (
-                      <Text color={span.color} dimColor={span.isDim} bold={span.isBold}>
-                        {span.text}
-                      </Text>
+      const section = (title: string, agents: AgentRow[]) =>
+        agents.length > 0 && (
+          <Box flexDirection="column">
+            <Text dimColor>{`${title} · ${agents.length}`}</Text>
+            {agents.map(agent => {
+              const card = agentCard(agent, { columns, now, frame })
+              return (
+                <Box flexDirection="column">
+                  {card.lines.map(line => (
+                    <Text wrap="truncate-end">
+                      {line.map(span => (
+                        <Text color={span.color} dimColor={span.isDim} bold={span.isBold}>
+                          {span.text}
+                        </Text>
+                      ))}
+                    </Text>
+                  ))}
+                  <Text>
+                    {'  '}
+                    {colorRuns(card.bar).map(run => (
+                      <Text color={run.color}>{BAR_CELL.repeat(run.count)}</Text>
                     ))}
                   </Text>
-                ))}
-                <Text>
-                  {'  '}
-                  {colorRuns(card.bar).map(run => (
-                    <Text color={run.color}>{BAR_CELL.repeat(run.count)}</Text>
-                  ))}
-                </Text>
-                {agent.id !== lastId && <Text dimColor>{SEPARATOR.repeat(columns)}</Text>}
-              </Box>
-            )
-          })}
+                  {agent.id !== lastId && <Text dimColor>{SEPARATOR.repeat(columns)}</Text>}
+                </Box>
+              )
+            })}
+          </Box>
+        )
+
+      return (
+        <Box flexDirection="column">
+          <Text bold>{PANE_TITLE}</Text>
+          {summaryMode(columns) === 'tiles' ? (
+            <Box flexDirection="row">
+              {[
+                ['Cost', cost],
+                ['Tokens', tokens],
+                ['Time', time],
+              ].map(([label, value]) => (
+                <Box flexDirection="column" borderStyle="round" width={tileWidth} paddingX={1}>
+                  <Text dimColor>{label}</Text>
+                  <Text bold>{tileValue(value!)}</Text>
+                </Box>
+              ))}
+            </Box>
+          ) : (
+            <Text>{fitToWidth(`${cost} · ${tokens} · ${time}`, columns)}</Text>
+          )}
+          {section('Running', running)}
+          {section('Finished', finished)}
         </Box>
       )
-
-    return (
-      <Box flexDirection="column">
-        <Text bold>{PANE_TITLE}</Text>
-        {summaryMode(columns) === 'tiles' ? (
-          <Box flexDirection="row">
-            {[
-              ['Cost', cost],
-              ['Tokens', tokens],
-              ['Time', time],
-            ].map(([label, value]) => (
-              <Box flexDirection="column" borderStyle="round" width={tileWidth} paddingX={1}>
-                <Text dimColor>{label}</Text>
-                <Text bold>{tileValue(value!)}</Text>
-              </Box>
-            ))}
-          </Box>
-        ) : (
-          <Text>{fitToWidth(`${cost} · ${tokens} · ${time}`, columns)}</Text>
-        )}
-        {section('Running', running)}
-        {section('Finished', finished)}
-      </Box>
-    )
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      return (
+        <Text color="error" wrap="truncate-end">
+          {`面板暫時畫不出來：${reason}`}
+        </Text>
+      )
+    }
   })
 }

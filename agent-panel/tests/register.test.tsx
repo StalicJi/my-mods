@@ -224,3 +224,31 @@ test('/clear 清空批次', async ($, on) => {
   await $.session.end({ reason: 'clear' } as any)
   expect(control.state.get('batch')).toBeNull()
 })
+
+test('沒有子代理在跑時計時器自己停下，即使錯過了停止的時機', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  await control.clock.advance(400)
+  expect(control.state.get('tick')).toBeGreaterThan(0)
+  // 模擬讀取競態：子代理已經完成，但 mod 沒在完成時停掉計時器
+  const batch = control.state.get('batch')
+  control.state.set('batch', { ...batch, agents: batch.agents.map((agent: any) => ({ ...agent, status: 'done', endedAt: 1 })) })
+  const stopped = control.state.get('tick')
+  await control.clock.advance(600)
+  expect(control.state.get('tick')).toBe(stopped)
+})
+
+test('面板先在背景等待、之後被放上畫面時，下一次工具呼叫就開始動畫', async ($, on) => {
+  const control = engine(on)
+  control.isPlaced = false
+  await start($)
+  await spawnAgent($)
+  await control.clock.advance(400)
+  expect(control.state.get('tick') ?? 0).toBe(0)
+  // 終端機拉寬後，host 把等待中的窗格放上畫面
+  control.panes = control.panes.map(pane => ({ ...pane, isPlaced: true }))
+  await $.tool.call({ tool: 'Read', file_path: '/w/src/app.ts', agentId: 'a1' } as any)
+  await control.clock.advance(400)
+  expect(control.state.get('tick')).toBeGreaterThan(0)
+})
