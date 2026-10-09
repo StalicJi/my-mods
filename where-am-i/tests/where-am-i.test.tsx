@@ -153,18 +153,25 @@ describe('where-am-i', () => {
   test('reads the JSON and drops em dashes', () => {
     expect(parseRecap('{"goal":"A — B","now":"","waiting":"","next":""}')?.goal).toBe('A, B')
     expect(parseRecap('no json here')).toBeNull()
+    // 存的時候每一句都留著，截斷留到畫框時依寬度做
     const long = parseRecap('{"goal":"g","now":"Part A of Merge Gate passed. Codex rules block without the luna model and codex exec too.","waiting":"","next":""}')
-    expect(long?.now).toBe('Part A of Merge Gate passed')
+    expect(long?.now).toBe('Part A of Merge Gate passed. Codex rules block without the luna model and codex exec too')
+    // 模型寫出一大段時只留安全上限 300 格
+    const huge = parseRecap(`{"goal":"g","now":"${'a'.repeat(400)}","waiting":"","next":""}`)
+    expect(huge?.now).toBe(`${'a'.repeat(299)}…`)
   })
 
-  test('中文：只取第一句，去掉句尾句號', () => {
-    expect(clip('安裝並測試 where-am-i 外掛。接著改成繁體中文。')).toBe('安裝並測試 where-am-i 外掛')
-    expect(clip('版本 v0.1.4 已安裝')).toBe('版本 v0.1.4 已安裝')
+  test('中文：每一句都保留，只去掉結尾的句號；換行併成空格，刪節號不動', () => {
+    expect(clip('安裝並測試 where-am-i 外掛。接著改成繁體中文。', 100)).toBe('安裝並測試 where-am-i 外掛。接著改成繁體中文')
+    expect(clip('版本 v0.1.4 已安裝', 100)).toBe('版本 v0.1.4 已安裝')
+    expect(clip('第一行\n  第二行', 100)).toBe('第一行 第二行')
+    expect(clip('等待安裝完成...', 100)).toBe('等待安裝完成...')
+    expect(clip('放不下', 0)).toBe('')
   })
 
   test('中文：依顯示寬度截斷，一個中文字算兩格', () => {
     const long = '這是一段很長的中文摘要內容用來測試截斷功能是否正確運作而且不會超出畫面寬度的限制範圍喔'
-    const clipped = clip(long)
+    const clipped = clip(long, 70)
     const width = Array.from(clipped).reduce((sum, char) => sum + (char === '…' ? 1 : 2), 0)
     expect(clipped.endsWith('…')).toBe(true)
     expect(width).toBeLessThanOrEqual(70)
@@ -175,6 +182,25 @@ describe('where-am-i', () => {
     // 40 格會切在 longRecap 中間，應退回前一個空格
     expect(clip('修改 register.tsx 裡的 summarize 與 longRecap 兩個 system prompt', 40)).toBe('修改 register.tsx 裡的 summarize 與…')
     expect(clip('正在讀取設定檔並比對兩個版本之間的差異', 20)).toBe('正在讀取設定檔並比…')
+  })
+
+  test('依框的實際寬度截斷：寬的框整句放得下，窄的框才補「…」', async ($, on) => {
+    // 截圖裡被固定 70 格切掉的那句，含標籤共 82 格
+    const now = '確認 2.1.293 版本：三個 mod 全部 validate、test、型別檢查通過，無需重新安裝'
+    engine(on, JSON.stringify({ goal: '合併計畫框', now, waiting: '', next: '' }))
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+    await $.turn.complete({ reason: 'answer', answer: 'done', durationMs: 1 } as any)
+    await wait()
+
+    const wide = await $.ui.mount({ plugin: 'where-am-i', surface: 'terminal', ...BAND } as any) // bodyColumns 120
+    expect(await wide.find({ type: 'Text', text: now })).toBeDefined()
+    expect(await wide.find({ type: 'Text', text: '…' })).toBeUndefined()
+    await wide.unmount()
+
+    // bodyColumns 50：框線與內距 4 格、「  Now: 」7 格，剩 39 格；切在 validate 中間，退回前一個空格
+    const narrow = await $.ui.mount({ plugin: 'where-am-i', surface: 'terminal', ...BAND, props: { ...BAND.props, bodyColumns: 50 } } as any)
+    expect(await narrow.find({ type: 'Text', text: '確認 2.1.293 版本：三個 mod 全部…' })).toBeDefined()
+    await narrow.unmount()
   })
 
   test('next 獨立一行，排在 now 下面', async ($, on) => {

@@ -11,6 +11,11 @@ const MAX_LOG = 20
 // 其他 mod 的內容（rest）留在框外，因為串接順序無法保證這個 mod 在最外層
 const BORDER_STYLE = 'round'
 const BORDER_COLOR = 'suggestion'
+// 外框左右各一格線、一格內距；框內每一列可用的寬度是 bodyColumns 扣掉這些，再扣掉標籤
+const BOX_CHROME_COLUMNS = 4
+const LABELS = { goal: '◆ Goal: ', now: '  Now: ', next: '  Next: ', wait: '  Wait: ' }
+// 存進 recap 前的安全上限：真正的截斷在畫框時依寬度做，這裡只防模型偶爾寫出一大段
+const MAX_STORED_COLUMNS = 300
 
 // Held by the host, so the recap survives a hot reload of this file.
 const recap = atom({ plugin: 'where-am-i', key: 'recap' } as const, null as Recap | null)
@@ -83,29 +88,31 @@ export const register: Register = on => {
     if (isCombinedBoxShown && (await isCleanViewLoaded($, cleanViewProbe))) return rest
 
     const { Box, Text } = $.ui.resolve(e)
-    const now = clip((await read($, live)) || r.now)
     const { value: hasNextSteps = false } = await $.state.get(nextStepsActive)
     const nextStep = hasNextSteps ? '' : r.next
+    // 依框的實際寬度截斷；wrap="truncate-end" 留著當保險，寬度算錯時也不會折成兩行
+    const innerColumns = e.props.bodyColumns - BOX_CHROME_COLUMNS
+    const fit = (label: string, text: string) => clip(text, innerColumns - displayWidth(label))
 
     return (
       <Box flexDirection="column">
         <Box flexDirection="column" paddingX={1} borderStyle={BORDER_STYLE} borderColor={BORDER_COLOR}>
           <Text wrap="truncate-end">
-            <Text color="cyan" bold>{'◆ Goal: '}</Text>
-            <Text>{clip(r.goal)}</Text>
+            <Text color="cyan" bold>{LABELS.goal}</Text>
+            <Text>{fit(LABELS.goal, r.goal)}</Text>
           </Text>
           <Text wrap="truncate-end">
-            <Text dimColor>{'  Now: '}</Text>
-            <Text>{now}</Text>
+            <Text dimColor>{LABELS.now}</Text>
+            <Text>{fit(LABELS.now, (await read($, live)) || r.now)}</Text>
           </Text>
           {nextStep !== '' && (
             <Text wrap="truncate-end">
-              <Text dimColor>{'  Next: '}</Text>
-              <Text>{clip(nextStep)}</Text>
+              <Text dimColor>{LABELS.next}</Text>
+              <Text>{fit(LABELS.next, nextStep)}</Text>
             </Text>
           )}
           {r.waiting !== '' && (
-            <Text color="yellow" wrap="truncate-end">{`  Wait: ${clip(r.waiting)}`}</Text>
+            <Text color="yellow" wrap="truncate-end">{`${LABELS.wait}${fit(LABELS.wait, r.waiting)}`}</Text>
           )}
         </Box>
         {rest}
@@ -212,17 +219,17 @@ async function longRecap($: EngineInterface, prompt: string, log: string[]) {
   return r.isAnswered ? r.text : '目前無法產生摘要。'
 }
 
-// 英文句點後要接空白才算句尾（避免切到 v0.1.4），中文句號後面直接就是下一句
-const SENTENCE_END = /(?<=[.!?])\s|(?<=[。！？])/
 // 東亞寬字元、全形符號與 emoji 在終端機佔兩格；範圍用 \u 跳脫，避免存檔時字元被正規化成別的碼位
 const WIDE_CHAR = /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6\u{1F300}-\u{1FAFF}\u{20000}-\u{3FFFD}]/u
 
-// 只取第一句，並以顯示寬度截到 max 格以內：模型不一定遵守字數限制。
+// 併成一行、去掉結尾的句號（刪節號不算），再以顯示寬度截到 maxColumns 格以內，放不下補「…」。
+// 以前只留第一句，模型多寫的句子會整句消失又沒有「…」提示，現在每一句都留著，放不下才截。
 // 原版用空格找斷點，中文沒有空格會切錯位置，所以改成依顯示寬度計算
-export function clip(text: string, max = 70) {
-  const first = text.split(SENTENCE_END)[0] ?? text
-  if (displayWidth(first) <= max) return first.replace(/[.。]$/, '')
-  return `${trimToWordBoundary(takeWidth(first, max - 1))}…`
+export function clip(text: string, maxColumns: number) {
+  const oneLine = text.replace(/\s+/g, ' ').trim().replace(/(?<![.。])[.。]$/, '')
+  if (displayWidth(oneLine) <= maxColumns) return oneLine
+  if (maxColumns <= 0) return ''
+  return `${trimToWordBoundary(takeWidth(oneLine, maxColumns - 1))}…`
 }
 
 function charWidth(char: string) {
@@ -258,7 +265,7 @@ export function parseRecap(text: string): Recap | null {
   const body = text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)
   try {
     const o = JSON.parse(body) as Record<string, unknown>
-    const field = (k: string) => (typeof o[k] === 'string' ? clip((o[k] as string).replace(/\s*—\s*/g, ', ').trim()) : '')
+    const field = (k: string) => (typeof o[k] === 'string' ? clip((o[k] as string).replace(/\s*—\s*/g, ', '), MAX_STORED_COLUMNS) : '')
     if (!field('goal')) return null
     return { goal: field('goal'), now: field('now'), waiting: field('waiting'), next: field('next') }
   } catch {
