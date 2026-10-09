@@ -25,7 +25,7 @@
     {
       "name": "gitlab-sync",
       "source": "./gitlab-sync",
-      "description": "GitLab Sync：輸入框上方顯示分支跟遠端差幾個 commit 與還開著的 issue 張數；GitLab 與 GitHub 上自己開的、指派給自己的 issue／MR（PR）與要自己審查的 MR（PR）有新動態時通知，/gitlab、/github 查看，也會列出自己開的或指派給自己、還開著的 issue（在 repo 裡只列這個專案的）"
+      "description": "GitLab Sync：輸入框上方顯示分支跟遠端差幾個 commit，以及還開著的張數（GitLab 的 Task、Issue 分開計數，GitHub 只有 Issue）；GitLab 與 GitHub 上自己開的、指派給自己的 issue／MR（PR）與要自己審查的 MR（PR）有新動態時通知，/gitlab、/github 查看，也會依類型分段列出自己開的或指派給自己、還開著的 Task、Issue（在 repo 裡只列這個專案的）"
     }
   ]
 }
