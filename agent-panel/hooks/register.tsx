@@ -1,26 +1,33 @@
 // Agent Panel：派出子代理時跳出面板，顯示這一回合每個子代理的模型、用量、估算費用與時間；/agents 開關
-import { atom, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import { atom, read, update } from 'claude-code'
+import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { Batch, TokenUsage } from '../types'
-import { addAgent, finishAgent, recordReported, recordStep, recordToolCall, seedRunning } from './batch'
-import { describeTool } from './layout'
+import type { AgentRow, Batch, TokenUsage } from '../types'
+import { addAgent, batchTotals, finishAgent, hasRunning, recordReported, recordStep, recordToolCall, seedRunning } from './batch'
+import { agentCard, colorRuns, describeTool, formatCost, formatElapsed, formatTokens, splitSections, summaryMode } from './layout'
 
 const PANE_ID = 'agent-panel'
 const PANE_TITLE = 'Agents'
 // 停靠在右邊時要求的寬度；放在輸入框上方時 Claude Code 會忽略它
 const PANE_COLUMNS = 42
 const NARROW_HINT = '子代理面板放不下：打 /agents 開啟'
+const EMPTY_HINT = '這個 session 還沒有派出子代理'
+// 彗星移動與時間跳動：每 0.2 秒一拍
+const ANIMATION_MS = 200
+const BAR_CELL = '▆'
+const SEPARATOR = '─'
 
 // 狀態由 host 保存，熱重載後仍在
 const batchAtom = atom({ plugin: 'agent-panel', key: 'batch' } as const, null as Batch | null)
-// 動畫計數器，只有面板讀，所以動畫只會讓面板重畫
+// 動畫計數器，只有面板讀，所以動畫只會讓面板重畫；不用 $.ui.invalidate，那會讓整個對話紀錄重跑
 const tickAtom = atom({ plugin: 'agent-panel', key: 'tick' } as const, 0)
 
-// 目前主回合的 turnId；熱重載後歸零，這時沿用現有批次
+// 下面三個是模組自己的變數，熱重載後重來
+// 目前主回合的 turnId；歸零時沿用現有批次
 let currentTurnId: string | null = null
 // 窗格放不下的提示每個 session 最多一次
 let hasWarnedNarrow = false
+let timer: Timer | undefined
 
 type SpawnFacts = { id: string; description: string; isNested: boolean }
 type FinishReason = 'answer' | 'aborted' | 'error' | 'refusal'
@@ -28,9 +35,42 @@ type FinishReason = 'answer' | 'aborted' | 'error' | 'refusal'
 // mod 自己開的窗格要終端機夠寬才放得下（使用者親手開過後門檻較低）；放不下時窗格在背景等，提示一次怎麼開
 export async function openPanel($: EngineInterface): Promise<void> {
   const opened = await $.ui.open({ id: PANE_ID, title: PANE_TITLE, columns: PANE_COLUMNS })
-  if (opened.isPlaced || hasWarnedNarrow) return
-  hasWarnedNarrow = true
-  $.ui.toast(NARROW_HINT)
+  if (!opened.isPlaced && !hasWarnedNarrow) {
+    hasWarnedNarrow = true
+    $.ui.toast(NARROW_HINT)
+  }
+  await syncTimer($)
+}
+
+// 由 mod 關閉，不會清掉「使用者親手開過」的紀錄（使用者按 ✕ 才會）
+async function closePanel($: EngineInterface) {
+  await $.ui.close({ id: PANE_ID }).catch(() => {})
+  await syncTimer($)
+}
+
+// 只在面板已放上畫面、而且有子代理在跑時計時；全部完成或面板關掉就停，不在背景空轉
+export async function syncTimer($: EngineInterface): Promise<void> {
+  try {
+    const [batch, panes] = await Promise.all([read($, batchAtom), $.ui.panes()])
+    const isShown = panes.some(pane => pane.id === PANE_ID && pane.isPlaced)
+    if (!isShown || !hasRunning(batch)) {
+      stopTimer()
+      return
+    }
+    if (timer === undefined) timer = $.clock.every(ANIMATION_MS, () => void update($, tickAtom, frame => frame + 1).catch(() => {}))
+  } catch {
+    // 略過：下一次寫入時再同步
+  }
+}
+
+function stopTimer() {
+  timer?.cancel()
+  timer = undefined
+}
+
+// 只有使用者本人送出的一般訊息才關面板：/ 開頭的指令、背景任務的通知、其他 session 或外掛送的都不算
+function isOwnMessage(originKind: string, text: string) {
+  return (originKind === 'composer' || originKind === 'bridge') && !text.trimStart().startsWith('/')
 }
 
 // 下面的記錄都只觀察：出錯就略過這次，不影響子代理本身
@@ -46,6 +86,7 @@ async function recordSpawn($: EngineInterface, spawn: SpawnFacts) {
       return next
     })
     if (isNewBatch) await openPanel($)
+    else await syncTimer($)
   } catch {
     // 略過
   }
@@ -84,6 +125,7 @@ async function recordFinish($: EngineInterface, agentId: string, reason: FinishR
   try {
     const endedAt = await $.clock.now()
     await update($, batchAtom, batch => (batch === null ? batch : finishAgent(batch, agentId, reason, endedAt)))
+    await syncTimer($)
   } catch {
     // 略過
   }
@@ -106,13 +148,37 @@ export const register: Register = on => {
     // 名稱已被佔用時會被拒絕，不影響其他功能
     await $.command.register({ name: 'agents', description: '開關子代理面板' }).catch(() => {})
     await seedFromAgentList($)
+    await syncTimer($) // 熱重載時把動畫接回來
     return started
+  })
+
+  on('session.end', async ($, e, next) => {
+    stopTimer()
+    if (e.reason === 'clear') await update($, batchAtom, () => null).catch(() => {})
+    return next(e)
   })
 
   // subagent 的執行不會發 turn.start，只有主迴圈會
   on('turn.start', async ($, e, next) => {
     currentTurnId = e.turnId
     return next(e)
+  })
+
+  on('prompt.submit', async ($, e, next) => {
+    if (isOwnMessage(e.origin.kind, e.text)) await closePanel($)
+    return next(e)
+  })
+
+  on('command.run', { command: 'agents' }, async $ => {
+    const panes = await $.ui.panes().catch(() => [])
+    if (panes.some(pane => pane.id === PANE_ID && pane.isPlaced)) {
+      await closePanel($)
+      return { text: '已關閉子代理面板。' }
+    }
+    // 使用者打指令開的窗格任何寬度都放得下，也讓之後 mod 自己開時門檻降到 110 欄
+    await $.ui.open({ id: PANE_ID, title: PANE_TITLE, columns: PANE_COLUMNS })
+    await syncTimer($)
+    return { text: '已開啟子代理面板。' }
   })
 
   on('agent.spawn', async ($, e, next) => {
@@ -144,7 +210,75 @@ export const register: Register = on => {
     if (e.agentId !== undefined) await recordFinish($, e.agentId, e.reason)
     return next(e)
   })
-}
 
-// 任務 5 的面板畫面與計時器會用到
-void tickAtom
+  // 面板：上方是這一批的總計，下面 Running、Finished 兩組卡片；版面規則都在 layout.ts
+  on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
+    const { Box, Text } = $.ui.resolve(e)
+    const [batch, frame] = await Promise.all([read($, batchAtom), read($, tickAtom)])
+    if (batch === null) return <Text dimColor>{EMPTY_HINT}</Text>
+
+    const columns = e.props.bodyColumns
+    const now = await $.clock.now()
+    const totals = batchTotals(batch, now)
+    const cost = formatCost(totals.costUsd, totals.hasUnpriced)
+    const tokens = formatTokens(totals.tokens)
+    const time = formatElapsed(totals.elapsedMs)
+    const { running, finished } = splitSections(batch)
+    const lastId = [...running, ...finished].at(-1)?.id
+    const tileWidth = Math.floor(columns / 3)
+
+    const section = (title: string, agents: AgentRow[]) =>
+      agents.length > 0 && (
+        <Box flexDirection="column">
+          <Text dimColor>{`${title} · ${agents.length}`}</Text>
+          {agents.map(agent => {
+            const card = agentCard(agent, { columns, now, frame })
+            return (
+              <Box flexDirection="column">
+                {card.lines.map(line => (
+                  <Text wrap="truncate-end">
+                    {line.map(span => (
+                      <Text color={span.color} dimColor={span.isDim} bold={span.isBold}>
+                        {span.text}
+                      </Text>
+                    ))}
+                  </Text>
+                ))}
+                <Text>
+                  {'  '}
+                  {colorRuns(card.bar).map(run => (
+                    <Text color={run.color}>{BAR_CELL.repeat(run.count)}</Text>
+                  ))}
+                </Text>
+                {agent.id !== lastId && <Text dimColor>{SEPARATOR.repeat(columns)}</Text>}
+              </Box>
+            )
+          })}
+        </Box>
+      )
+
+    return (
+      <Box flexDirection="column">
+        <Text bold>{PANE_TITLE}</Text>
+        {summaryMode(columns) === 'tiles' ? (
+          <Box flexDirection="row">
+            {[
+              ['Cost', cost],
+              ['Tokens', tokens],
+              ['Time', time],
+            ].map(([label, value]) => (
+              <Box flexDirection="column" borderStyle="round" width={tileWidth} paddingX={1}>
+                <Text dimColor>{label}</Text>
+                <Text bold>{value}</Text>
+              </Box>
+            ))}
+          </Box>
+        ) : (
+          <Text>{`${cost} · ${tokens} · ${time}`}</Text>
+        )}
+        {section('Running', running)}
+        {section('Finished', finished)}
+      </Box>
+    )
+  })
+}

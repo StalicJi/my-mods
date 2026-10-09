@@ -1,30 +1,28 @@
 import { expect, mock, test } from 'claude-code/testing'
 
+import { stateStore } from './state-store'
+
 const USAGE = { input_tokens: 1000, output_tokens: 2000, cache_read_input_tokens: 10_000, cache_creation_input_tokens: 5000 }
 
 type SpawnReply = { model?: string; agentId?: string; deny?: string; teammateId?: string }
 
-// 測試的 $ 沒有 state 名詞：代替 host 保存 agent-panel 的 state，照 ifVersion 檢查版本，update 衝突時才會重試
-function stateStore(on: any) {
-  const held = new Map<string, { value: unknown; version: number }>()
-  for (const key of ['batch', 'tick']) {
-    const ref = { plugin: 'agent-panel', key }
-    on('state.get', ref, () => ({ value: { value: held.get(key)?.value, version: held.get(key)?.version ?? 0 } }))
-    on('state.set', ref, (_$: any, e: any) => {
-      const version = held.get(key)?.version ?? 0
-      if (e.ifVersion !== undefined && e.ifVersion !== version) return { value: { isSet: false, version } }
-      held.set(key, { value: e.value, version: version + 1 })
-      return { value: { isSet: true, version: version + 1 } }
-    })
-  }
-  // 測試裡直接讀欄位，回傳 any 省去逐一轉型
-  return { get: (key: string): any => held.get(key)?.value ?? null }
-}
-
 // 代替 mod 底下的 engine：記下開窗格與提示，agent.spawn 依序回 a1、a2…（spawnReplies 有排定的就先用）
-function engine(on: any) {
-  const control = { opens: [] as any[], toasts: [] as unknown[], isPlaced: true, spawnReplies: [] as SpawnReply[], spawned: 0, state: stateStore(on) }
-  mock.clock(on)
+function engine(on: any, initialState: Record<string, unknown> = {}) {
+  const control = {
+    opens: [] as any[], closes: [] as any[], toasts: [] as unknown[], isPlaced: true,
+    spawnReplies: [] as SpawnReply[], spawned: 0, state: stateStore(on, initialState),
+    // 代替 host 的窗格清單：開了就列出，關了就移除
+    panes: [] as { id: string; title: string; isShown: boolean; isFocused: boolean; isPlaced: boolean }[],
+    clock: mock.clock(on),
+  }
+  on('prompt.submit', () => ({ text: '' }))
+  on('session.end', () => ({ sessionId: 's' }))
+  on('ui.panes', () => ({ value: control.panes }))
+  on('ui.close', (_$: any, e: any) => {
+    control.closes.push(e)
+    control.panes = control.panes.filter(pane => pane.id !== e.id)
+    return { value: undefined }
+  })
   on('session.start', (_$: any, e: any) => ({ sessionId: 's', cwd: e.cwd }))
   on('turn.start', (_$: any, e: any) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
@@ -38,6 +36,7 @@ function engine(on: any) {
   on('command.register', () => ({ value: undefined }))
   on('ui.open', (_$: any, e: any) => {
     control.opens.push(e)
+    control.panes = [...control.panes.filter(pane => pane.id !== e.id), { id: e.id, title: e.title, isShown: true, isFocused: false, isPlaced: control.isPlaced }]
     return { value: { isPlaced: control.isPlaced } }
   })
   on('ui.toast', (_$: any, e: any) => {
@@ -158,4 +157,64 @@ test('平行派出 8 個子代理全部記下', async ($, on) => {
   await Promise.all(Array.from({ length: 8 }, () => spawnAgent($)))
   expect((control.state.get('batch')).agents).toHaveLength(8)
   expect(control.opens).toHaveLength(1)
+})
+
+const submit = ($: any, text: string, kind: string) => $.prompt.submit({ text, origin: { kind }, wait: false })
+
+test('你送出訊息時關閉面板，/ 開頭、背景通知與外掛送的不關', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  await submit($, '繼續', 'composer')
+  expect(control.closes).toHaveLength(1)
+  expect(control.closes[0]).toMatchObject({ id: 'agent-panel' })
+  await submit($, '/agents', 'composer')
+  await submit($, '背景任務完成', 'task-notification')
+  await submit($, '外掛送的', 'plugin')
+  expect(control.closes).toHaveLength(1)
+})
+
+test('/agents 開著就關、關著就開', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  const closed = await $.command.run({ command: 'agents', args: '' } as any)
+  expect(control.closes).toHaveLength(1)
+  expect(closed.text).toBe('已關閉子代理面板。')
+  const opened = await $.command.run({ command: 'agents', args: '' } as any)
+  expect(control.opens).toHaveLength(2)
+  expect(opened.text).toBe('已開啟子代理面板。')
+})
+
+test('有子代理在跑而且面板開著才跑計時器', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  await control.clock.advance(600)
+  const ticking = control.state.get('tick')
+  expect(ticking).toBeGreaterThan(0)
+  await $.turn.complete({ reason: 'answer', answer: '好了', durationMs: 1, agentId: 'a1', turnId: 'x' } as any)
+  const stopped = control.state.get('tick')
+  await control.clock.advance(600)
+  expect(control.state.get('tick')).toBe(stopped)
+})
+
+test('熱重載後 session.start 接回計時器', async ($, on) => {
+  const running = {
+    id: 'a1', description: '任務', isNested: false, status: 'running', startedAt: 0, endedAt: null, failureReason: null,
+    model: null, effort: null, toolCount: 0, activity: '', lastUsage: null, reportedTokens: null, costUsd: 0, hasUnpricedUsage: false,
+  }
+  const control = engine(on, { batch: { turnId: 't1', agents: [running] } })
+  control.panes = [{ id: 'agent-panel', title: 'Agents', isShown: true, isFocused: false, isPlaced: true }]
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/w' } as any)
+  await control.clock.advance(600)
+  expect(control.state.get('tick')).toBeGreaterThan(0)
+})
+
+test('/clear 清空批次', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  await $.session.end({ reason: 'clear' } as any)
+  expect(control.state.get('batch')).toBeNull()
 })
