@@ -1,10 +1,10 @@
-// Agent Panel：派出子代理時跳出面板，顯示這一回合每個子代理的模型、用量、估算費用與時間；/agents 開關
+// Agent Panel：派出子代理時跳出面板，顯示這一回合每個子代理的模型、用量與時間；/agents 開關
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer, ToolCallInput } from 'claude-code'
 
 import type { AgentRow, Batch, TokenUsage } from '../types'
 import { addAgent, batchTotals, finishAgent, hasRunning, recordReported, recordStep, recordToolCall, seedRunning } from './batch'
-import { agentCard, colorRuns, describeTool, fitToWidth, formatCost, formatElapsed, formatTokens, splitSections, summaryMode } from './layout'
+import { agentCard, colorRuns, describeTool, fitToWidth, formatElapsed, formatTokens, splitSections, summaryMode } from './layout'
 
 const PANE_ID = 'agent-panel'
 const PANE_TITLE = 'Agents'
@@ -255,12 +255,11 @@ export const register: Register = on => {
       const columns = e.props.bodyColumns
       const now = await $.clock.now()
       const totals = batchTotals(batch, now)
-      const cost = formatCost(totals.costUsd, totals.hasUnpriced)
       const tokens = formatTokens(totals.tokens)
       const time = formatElapsed(totals.elapsedMs)
       const { running, finished } = splitSections(batch)
       const lastId = [...running, ...finished].at(-1)?.id
-      const tileWidth = Math.floor(columns / 3)
+      const tileWidth = Math.floor(columns / 2)
       // 值放不下時截斷，不讓格子折行變高
       const tileValue = (value: string) => fitToWidth(value, tileWidth - TILE_CHROME_COLUMNS)
 
@@ -300,7 +299,6 @@ export const register: Register = on => {
           {summaryMode(columns) === 'tiles' ? (
             <Box flexDirection="row">
               {[
-                ['Cost', cost],
                 ['Tokens', tokens],
                 ['Time', time],
               ].map(([label, value]) => (
@@ -311,7 +309,7 @@ export const register: Register = on => {
               ))}
             </Box>
           ) : (
-            <Text>{fitToWidth(`${cost} · ${tokens} · ${time}`, columns)}</Text>
+            <Text>{fitToWidth(`${tokens} · ${time}`, columns)}</Text>
           )}
           {section('Running', running)}
           {section('Finished', finished)}

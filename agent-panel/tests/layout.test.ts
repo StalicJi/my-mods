@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Span } from '../hooks/layout'
-import { agentCard, displayWidth, fitToWidth, formatCost, formatElapsed, formatTokens, splitSections, summaryMode } from '../hooks/layout'
+import { agentCard, displayWidth, fitToWidth, formatElapsed, formatTokens, splitSections, summaryMode } from '../hooks/layout'
 import type { AgentRow } from '../types'
 
 const row = (patch: Partial<AgentRow> = {}): AgentRow => ({
@@ -12,10 +12,9 @@ const row = (patch: Partial<AgentRow> = {}): AgentRow => ({
 })
 const text = (line: Span[]) => line.map(s => s.text).join('')
 
-test('格式：時間、token、費用', () => {
+test('格式：時間、token', () => {
   expect([formatElapsed(2000), formatElapsed(47_000), formatElapsed(3_723_000)]).toEqual(['0:02', '0:47', '1:02:03'])
   expect([formatTokens(950), formatTokens(26_400), formatTokens(150_000), formatTokens(1_240_000)]).toEqual(['950', '26k', '150k', '1.2M'])
-  expect([formatCost(0.08, false), formatCost(0, true), formatCost(0.28, true)]).toEqual(['≈$0.08', '≈?', '≈$0.28+?'])
 })
 
 test('依顯示寬度截斷，中文一字兩格', () => {
@@ -26,7 +25,10 @@ test('依顯示寬度截斷，中文一字兩格', () => {
 
 test('執行中卡片 5 列：名稱、模型、正在做什麼、用量、進度條', () => {
   const card = agentCard(row(), { columns: 40, now: 2000, frame: 3 })
-  expect(card.lines.map(text)).toEqual(['● Review the whole kit', '  Opus 5.5 · xhigh · 12 tools', '  讀取 src/app.ts', '  ctx 3% · 27k · ≈$0.00 · 0:02'])
+  expect(card.lines.map(text)).toEqual(['● Review the whole kit', '  Opus 5.5 · xhigh · 12 tools', '  讀取 src/app.ts', '  ctx 3% · 27k · 0:02'])
+  // 還沒有 usage 時算不出 ctx，省略那一段
+  const withoutContext = agentCard(row({ lastUsage: null, reportedTokens: 26_400 }), { columns: 40, now: 2000, frame: 3 })
+  expect(text(withoutContext.lines.at(-1)!)).toBe('  26k · 0:02')
   expect(card.bar).toHaveLength(38)
   expect(card.lines[1]![0]).toMatchObject({ text: '  ' })
   expect(card.lines[1]![1]).toMatchObject({ text: 'Opus 5.5', color: '#f79a4f' })

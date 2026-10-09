@@ -36,20 +36,27 @@ test('沒有批次時顯示提示', async ($, on) => {
   await ui.unmount()
 })
 
-test('三格統計、Running 與 Finished 分組', async ($, on) => {
+test('兩格統計（不顯示費用）、Running 與 Finished 分組', async ($, on) => {
   const ui = await mountWith($, on, [row('a'), row('b', { status: 'done', endedAt: 5000 }), row('c', { status: 'done', endedAt: 7000 })])
-  for (const label of [/^Agents$/, /^Cost$/, /^Tokens$/, /^Time$/, /^Running · 1$/, /^Finished · 2$/])
+  for (const label of [/^Agents$/, /^Tokens$/, /^Time$/, /^Running · 1$/, /^Finished · 2$/])
     expect(await ui.find({ type: 'Text', text: label })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Cost$/ })).toBeUndefined()
+  // 卡片的用量列也不顯示費用
+  expect(await ui.findAll({ type: 'Text', text: /≈\$/ })).toHaveLength(0)
   const drawn = await ui.drawn()
-  expect(countNodes(drawn, node => node.type === 'Box' && node.props?.borderStyle === 'round')).toBe(3)
+  const isTile = (node: any) => node.type === 'Box' && node.props?.borderStyle === 'round'
+  expect(countNodes(drawn, isTile)).toBe(2)
+  // 42 欄平分成兩格
+  expect(countNodes(drawn, node => isTile(node) && node.props?.width === 21)).toBe(2)
   expect(await ui.findAll({ type: 'Text', text: /^✓ \S/ })).toHaveLength(2)
   await ui.unmount()
 })
 
-test('窄面板改成一行統計', async ($, on) => {
+test('窄面板改成一行統計：tokens · time', async ($, on) => {
   const ui = await mountWith($, on, [row('a')], 30)
-  expect(await ui.find({ type: 'Text', text: /^Cost$/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^≈\$\d+\.\d{2} · .+ · \d+:\d{2}$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Tokens$/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^\S+ · \d+:\d{2}$/ })).toBeDefined()
+  expect(await ui.findAll({ type: 'Text', text: /≈\$/ })).toHaveLength(0)
   await ui.unmount()
 })
 
@@ -59,19 +66,20 @@ test('8 個子代理全部畫出來', async ($, on) => {
   await ui.unmount()
 })
 
-test('統計三格的值放不下時截斷，不折行', async ($, on) => {
-  // 36 欄：每格寬 12，扣掉框線與內距剩 8 格，放不下 9 格的 ≈$12.34+?
-  const ui = await mountWith($, on, [row('a', { costUsd: 12.34, hasUnpricedUsage: true })], 36)
-  // 要精確比對：卡片的用量列也包含完整費用
-  expect(await ui.find({ type: 'Text', text: /^≈\$12\.34\+\?$/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^≈\$12\.34…$/ })).toBeDefined()
+test('統計兩格的值放不下時截斷，不折行', async ($, on) => {
+  // 36 欄：每格寬 18，扣掉框線與內距剩 14 格，放不下 15 格的 100000000000.0M。
+  // 實際的 token 數與時間在 14 格內都放得下，只能用誇張的數字測這道防線
+  const ui = await mountWith($, on, [row('a', { reportedTokens: 1e17 })], 36)
+  // 要精確比對：卡片的用量列也包含完整 token 數
+  expect(await ui.find({ type: 'Text', text: /^100000000000\.0M$/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^100000000000\.…$/ })).toBeDefined()
   await ui.unmount()
 })
 
 test('單行統計放不下時截斷，不折行', async ($, on) => {
-  // 20 欄：「≈$12.34+? · 27k · 0:00」寬 22
-  const ui = await mountWith($, on, [row('a', { costUsd: 12.34, hasUnpricedUsage: true })], 20)
-  expect(await ui.find({ type: 'Text', text: /^≈\$12\.34\+\? · 27k · 0…$/ })).toBeDefined()
+  // 8 欄：「27k · 0:00」寬 10
+  const ui = await mountWith($, on, [row('a')], 8)
+  expect(await ui.find({ type: 'Text', text: /^27k · 0…$/ })).toBeDefined()
   await ui.unmount()
 })
 

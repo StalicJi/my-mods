@@ -1,4 +1,4 @@
-// 面板的版面：把一個子代理變成每一列的文字、顏色與進度條格子，以及時間、token、費用的格式。
+// 面板的版面：把一個子代理變成每一列的文字、顏色與進度條格子，以及時間、token 的格式。
 // displayWidth、fitToWidth、colorRuns、cometColor、describeTool 照搬自 clean-view/hooks/register.tsx
 // （mod 之間不能共用程式碼），改那邊的用字或配色時這裡要一起改
 import type { AgentRow, Batch } from '../types'
@@ -25,7 +25,7 @@ const INDENT = '  '
 // 彗星：頭最亮，後面四格一格比一格淡，融進底色
 const COMET_FADE = [1, 0.7, 0.45, 0.25, 0.1]
 const COMET_COLOR_HALF_PERIOD_FRAMES = 15 // 從橘變到藍約 3 秒（每拍 0.2 秒）
-// 面板內寬窄於這個欄數時，三格統計放不下，改成一行
+// 面板內寬窄於這個欄數時，兩格統計放不下，改成一行
 const TILES_MIN_COLUMNS = 36
 
 export function formatElapsed(ms: number): string {
@@ -41,12 +41,6 @@ export function formatTokens(count: number): string {
   const thousands = Math.round(count / 1000)
   if (thousands < 1000) return `${thousands}k`
   return `${(count / 1_000_000).toFixed(1)}M`
-}
-
-// 費用一律是估算，標「≈」；有請求的模型不在價目表時補「?」
-export function formatCost(costUsd: number, hasUnpriced: boolean): string {
-  if (hasUnpriced && costUsd === 0) return '≈?'
-  return `≈$${costUsd.toFixed(2)}${hasUnpriced ? '+?' : ''}`
 }
 
 export function summaryMode(columns: number): 'tiles' | 'line' {
@@ -94,7 +88,6 @@ function usageLine(row: AgentRow, now: number): Span[] {
   const parts = [
     ...(percent === null ? [] : [`ctx ${percent}%`]),
     formatTokens(agentTokens(row)),
-    formatCost(row.costUsd, row.hasUnpricedUsage),
     formatElapsed((row.endedAt ?? now) - row.startedAt),
   ]
   return [{ text: INDENT }, { text: parts.join(' · '), isDim: true }]
