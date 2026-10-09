@@ -5,13 +5,17 @@ import { requestCostUsd, totalTokens } from './pricing'
 
 type SpawnFacts = { id: string; description: string; isNested: boolean; startedAt: number }
 type FinishReason = 'answer' | 'aborted' | 'error' | 'refusal'
-type ListedAgent = { id: string; description: string; status: string; parentId?: string }
+type ListedAgent = { id: string; description: string; status: string; parentId?: string; teammateId?: string }
 
 const FAILURE_REASONS: Record<Exclude<FinishReason, 'answer'>, string> = {
   aborted: '已中斷',
   error: 'API 錯誤',
   refusal: '模型拒絕',
 }
+
+// $.agent.list() 裡這一輪還沒結束、之後會收到 turn.complete 的狀態：還沒開始、正在跑、等權限或背景工作。
+// idle 是這一輪已結束、等訊息喚醒（teammate），補成 running 會一直收不到結束而卡住，所以不算
+const LIVE_STATUSES: ReadonlySet<string> = new Set(['pending', 'running', 'waiting'])
 
 function newRow(spawn: SpawnFacts): AgentRow {
   return {
@@ -97,11 +101,12 @@ export function finishAgent(batch: Batch, agentId: string, reason: FinishReason,
 }
 
 // 熱重載或面板開啟前就在跑的子代理：用 $.agent.list() 補上，用量從之後的請求開始累計
+// teammate 跟派出時一樣不列入面板
 export function seedRunning(batch: Batch | null, listed: readonly ListedAgent[], now: number): Batch | null {
   if (batch === null) return null
   const known = new Set(batch.agents.map(agent => agent.id))
   const added = listed
-    .filter(agent => agent.status === 'running' && !known.has(agent.id))
+    .filter(agent => agent.teammateId === undefined && LIVE_STATUSES.has(agent.status) && !known.has(agent.id))
     .map(agent => newRow({ id: agent.id, description: agent.description, isNested: agent.parentId !== undefined, startedAt: now }))
   return added.length === 0 ? batch : { ...batch, agents: [...batch.agents, ...added] }
 }

@@ -1,6 +1,6 @@
 // Agent Panel：派出子代理時跳出面板，顯示這一回合每個子代理的模型、用量、估算費用與時間；/agents 開關
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, Timer } from 'claude-code'
+import type { EngineInterface, Register, Timer, ToolCallInput } from 'claude-code'
 
 import type { AgentRow, Batch, TokenUsage } from '../types'
 import { addAgent, batchTotals, finishAgent, hasRunning, recordReported, recordStep, recordToolCall, seedRunning } from './batch'
@@ -92,6 +92,13 @@ function isOwnMessage(originKind: string, text: string) {
   return (originKind === 'composer' || originKind === 'bridge') && !text.trimStart().startsWith('/')
 }
 
+// Claude Code 自己的內部 fork（例如 compaction）也帶 agentId，但不在這一批。
+// update 就算拿回同一個值也會寫一次、讓面板重畫，所以先讀過確認；更新函式裡照樣會再檢查，讀完到寫入之間批次換了也不會寫錯
+async function isInBatch($: EngineInterface, agentId: string) {
+  const batch = await read($, batchAtom)
+  return batch !== null && batch.agents.some(agent => agent.id === agentId)
+}
+
 // 下面的記錄都只觀察：出錯就略過這次，不影響子代理本身
 async function recordSpawn($: EngineInterface, spawn: SpawnFacts) {
   try {
@@ -113,14 +120,17 @@ async function recordSpawn($: EngineInterface, spawn: SpawnFacts) {
 
 async function recordStepUsage($: EngineInterface, agentId: string, step: { model: string; effort?: string | number; usage: TokenUsage | null }) {
   try {
+    if (!(await isInBatch($, agentId))) return
     await update($, batchAtom, batch => (batch === null ? batch : recordStep(batch, agentId, step)))
   } catch {
     // 略過
   }
 }
 
-async function recordTool($: EngineInterface, agentId: string, activity: string) {
+async function recordTool($: EngineInterface, agentId: string, call: ToolCallInput) {
   try {
+    if (!(await isInBatch($, agentId))) return
+    const activity = describeTool(call.tool, call)
     await update($, batchAtom, batch => (batch === null ? batch : recordToolCall(batch, agentId, activity)))
     // 面板可能先在背景等待、終端機拉寬後才放上畫面，這時沒有事件通知；趁工具呼叫補啟動動畫
     if (timer === undefined) await syncTimer($)
@@ -136,6 +146,7 @@ async function recordAgentResult($: EngineInterface, record: unknown) {
   if (typeof reported.agentId !== 'string') return
   const agentId = reported.agentId
   try {
+    if (!(await isInBatch($, agentId))) return
     await update($, batchAtom, batch => (batch === null ? batch : recordReported(batch, agentId, reported)))
   } catch {
     // 略過
@@ -144,6 +155,7 @@ async function recordAgentResult($: EngineInterface, record: unknown) {
 
 async function recordFinish($: EngineInterface, agentId: string, reason: FinishReason) {
   try {
+    if (!(await isInBatch($, agentId))) return
     const endedAt = await $.clock.now()
     await update($, batchAtom, batch => (batch === null ? batch : finishAgent(batch, agentId, reason, endedAt)))
     await syncTimer($)
@@ -218,7 +230,7 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     if (e.agentId !== undefined) {
-      await recordTool($, e.agentId, describeTool(e.tool, e))
+      await recordTool($, e.agentId, e)
       return next(e)
     }
     if (e.tool !== 'Agent') return next(e)

@@ -71,3 +71,23 @@ test('seedRunning 補上清單裡還在跑、這一批沒有的子代理', () =>
   expect(b!.agents.map(a => [a.id, a.isNested, a.startedAt])).toEqual([['a', false, 0], ['n', true, 50]])
   expect(seedRunning(null, [], 0)).toBeNull()
 })
+
+test('seedRunning 也補上還沒開始、等待中的子代理（列為 running）；閒置與已結束的不補', () => {
+  const b = seedRunning(addAgent(null, 't1', spawn('a')), [
+    { id: 'p', description: '還沒開始', status: 'pending' },
+    { id: 'w', description: '等待中', status: 'waiting' },
+    { id: 'i', description: '閒置', status: 'idle' },
+    { id: 'c', description: '完成', status: 'completed' },
+    { id: 'f', description: '失敗', status: 'failed' },
+    { id: 'k', description: '已停止', status: 'killed' },
+  ], 50)
+  expect(b!.agents.map(a => [a.id, a.status])).toEqual([['a', 'running'], ['p', 'running'], ['w', 'running']])
+})
+
+test('seedRunning 不補 teammate，跟派出時一致', () => {
+  const b = seedRunning(addAgent(null, 't1', spawn('a')), [
+    { id: 'bob', description: '隊友', status: 'running', teammateId: 'bob@team' },
+    { id: 'n', description: '子代理', status: 'running' },
+  ], 50)
+  expect(b!.agents.map(a => a.id)).toEqual(['a', 'n'])
+})

@@ -125,6 +125,17 @@ test('子代理的工具呼叫累加次數並更新正在做什麼', async ($, o
   expect((control.state.get('batch')).agents[0]).toMatchObject({ toolCount: 1, activity: '讀取 src/app.ts' })
 })
 
+test('不在這一批的 agentId（例如 Claude Code 的內部 fork）不寫 state', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  const writesBefore = control.state.writes('batch')
+  expect(writesBefore).toBeGreaterThan(0)
+  await step($, 'internal-fork')
+  await $.tool.call({ tool: 'Read', file_path: '/w/src/app.ts', agentId: 'internal-fork' } as any)
+  expect(control.state.writes('batch')).toBe(writesBefore)
+})
+
 test('前景子代理完成時以 Agent 結果的總計為準', async ($, on) => {
   const control = engine(on)
   await start($)
