@@ -64,6 +64,31 @@ function mascotCards(node: any): any[] {
   return [...own, ...children.flatMap(mascotCards)]
 }
 
+// 每隻小人佔畫面的哪幾列（含頭不含尾）：小人從卡片的第一列畫起
+function mascotSpans(drawn: any): { from: number; to: number }[] {
+  const spans: { from: number; to: number }[] = []
+  let rowIndex = 0
+  const walk = (node: any): void => {
+    if (!node || typeof node !== 'object') return
+    if (node.type === 'Text') {
+      rowIndex += 1
+      return
+    }
+    const children = (node.children ?? []) as any[]
+    const raster = node.type === 'Box' ? children.find(child => child?.type === 'Raster') : undefined
+    if (raster !== undefined) {
+      spans.push({ from: rowIndex, to: rowIndex + raster.props.rows })
+      rowIndex += drawnRows(node).length
+      return
+    }
+    children.forEach(walk)
+  }
+  walk(drawn)
+  return spans
+}
+
+const rowCountOf = (agents: AgentRow[], options: { withMascot: boolean }) => fullRowCount({ turnId: 't1', agents }, options)
+
 const GROUP_LABEL = /^(Running|Failed|Done)/
 const CARD_TITLE = /^[●✗✓] /
 const isBlank = (line: string) => line.trim() === ''
@@ -108,7 +133,7 @@ test('完整模式：列數等於 fullRowCount，組與組之間空一列，頭�
   const agents = [row('a'), failed('f'), done('d')]
   const ui = await mountWith($, on, agents)
   const rows = drawnRows(await ui.drawn())
-  expect(rows).toHaveLength(fullRowCount({ turnId: 't1', agents }))
+  expect(rows).toHaveLength(rowCountOf(agents, { withMascot: true }))
   expect(rows[1]).toBe('Running')
   // 空行後面接的一定是下一組的組名
   const afterBlank = rows.flatMap((line, index) => (isBlank(line) ? [rows[index + 1]] : []))
@@ -131,7 +156,7 @@ test('面板放在輸入框上方時用精簡模式：每個子代理一列，�
 
 test('完整模式超過面板可見列數時改精簡模式，剛好放得下時維持完整模式', async ($, on) => {
   const agents = [row('a'), row('b'), done('d')]
-  const fullRows = fullRowCount({ turnId: 't1', agents })
+  const fullRows = rowCountOf(agents, { withMascot: true })
   setup(on, agents)
   const fits = await mount($, { bodyRows: fullRows })
   expect(drawnRows(await fits.drawn())).toHaveLength(fullRows)
@@ -191,7 +216,7 @@ test('畫上小人後：卡片文字少 8 欄、狀態列仍是整個寬度，�
   const ui = await mountWith($, on, agents)
   const drawn = await ui.drawn()
   const rows = drawnRows(drawn)
-  expect(rows).toHaveLength(fullRowCount({ turnId: 't1', agents }))
+  expect(rows).toHaveLength(rowCountOf(agents, { withMascot: true }))
   expect(displayWidth(rows[0]!)).toBe(42)
   expect(rows.filter(line => CARD_TITLE.test(line)).map(displayWidth)).toEqual([34, 34, 34])
   expect(rows.filter(line => line.includes('▆')).map(displayWidth)).toEqual([34])
@@ -211,7 +236,7 @@ test('精簡模式不畫小人：放在輸入框上方，或完整模式放不�
   const inline = await mount($, { placement: 'inline', bodyColumns: 100 })
   expect(await rastersOf(inline)).toEqual([])
   await inline.unmount()
-  const overflows = await mount($, { bodyRows: fullRowCount({ turnId: 't1', agents }) - 1 })
+  const overflows = await mount($, { bodyRows: rowCountOf(agents, { withMascot: true }) - 1 })
   expect(drawnRows(await overflows.drawn())).toHaveLength(1 + agents.length)
   expect(await rastersOf(overflows)).toEqual([])
   await overflows.unmount()
@@ -235,9 +260,80 @@ test('終端機以外的介面（desktop 的 Raster 畫成空的 fragment）不�
   const drawn = await ui.drawn()
   expect(mascotCards(drawn)).toEqual([])
   const rows = drawnRows(drawn)
-  expect(rows).toHaveLength(fullRowCount({ turnId: 't1', agents }))
+  expect(rows).toHaveLength(rowCountOf(agents, { withMascot: false }))
   expect(rows.filter(line => CARD_TITLE.test(line)).map(displayWidth)).toEqual([42, 42])
   await ui.unmount()
+})
+
+test('畫小人時，相鄰兩張完成卡片之間空一列，兩隻小小人隔一列、不黏成一隻；列數等於 fullRowCount', async ($, on) => {
+  const agents = [done('d1'), done('d2')]
+  const ui = await mountWith($, on, agents)
+  const drawn = await ui.drawn()
+  const rows = drawnRows(drawn)
+  expect(rows).toHaveLength(rowCountOf(agents, { withMascot: true }))
+  // 狀態列、Done、第一張卡片 2 列，接著空一列，再接第二張卡片
+  expect(rows.flatMap((line, index) => (isBlank(line) ? [index] : []))).toEqual([4])
+  expect(rows[5]).toMatch(CARD_TITLE)
+  const [upper, lower] = mascotSpans(drawn)
+  expect(lower!.from - upper!.to).toBe(1)
+  await ui.unmount()
+})
+
+test('畫小人時，三張完成卡片之間各空一列，最後一張後面不空', async ($, on) => {
+  const agents = [done('d1'), done('d2'), done('d3')]
+  const ui = await mountWith($, on, agents)
+  const drawn = await ui.drawn()
+  const rows = drawnRows(drawn)
+  expect(rows).toHaveLength(rowCountOf(agents, { withMascot: true }))
+  expect(rows.flatMap((line, index) => (isBlank(line) ? [index] : []))).toEqual([4, 7])
+  const spans = mascotSpans(drawn)
+  expect(spans.slice(1).map((span, index) => span.from - spans[index]!.to)).toEqual([1, 1])
+  await ui.unmount()
+})
+
+test('畫小人時，執行中與失敗卡片之間不多空列，空行只在組與組之間', async ($, on) => {
+  const agents = [row('a'), row('b'), failed('f1'), failed('f2'), done('d')]
+  const ui = await mountWith($, on, agents)
+  const rows = drawnRows(await ui.drawn())
+  expect(rows).toHaveLength(rowCountOf(agents, { withMascot: true }))
+  expect(rows).toHaveLength(rowCountOf(agents, { withMascot: false }))
+  expect(rows.flatMap((line, index) => (isBlank(line) ? [rows[index + 1]] : []))).toEqual(['Failed', 'Done'])
+  await ui.unmount()
+})
+
+test('不畫小人時（面板太窄、終端機以外的介面、精簡模式）完成卡片之間不空列', async ($, on) => {
+  const agents = [done('d1'), done('d2')]
+  setup(on, agents)
+  for (const options of [{ bodyColumns: 31 }, { surface: 'desktop' as const }]) {
+    const ui = await mount($, options)
+    const rows = drawnRows(await ui.drawn())
+    expect(rows).toHaveLength(rowCountOf(agents, { withMascot: false }))
+    expect(rows.filter(isBlank)).toEqual([])
+    await ui.unmount()
+  }
+  const inline = await mount($, { placement: 'inline', bodyColumns: 100 })
+  const rows = drawnRows(await inline.drawn())
+  expect(rows).toHaveLength(1 + agents.length)
+  expect(rows.filter(isBlank)).toEqual([])
+  await inline.unmount()
+})
+
+test('判斷精簡模式時，列數依實際會不會畫小人計算', async ($, on) => {
+  const agents = [done('d1'), done('d2'), done('d3')]
+  setup(on, agents)
+  // 會畫小人：空列也算進去，剛好放得下才維持完整模式
+  const withMascotRows = rowCountOf(agents, { withMascot: true })
+  const fits = await mount($, { bodyRows: withMascotRows })
+  expect(drawnRows(await fits.drawn())).toHaveLength(withMascotRows)
+  await fits.unmount()
+  const overflows = await mount($, { bodyRows: withMascotRows - 1 })
+  expect(drawnRows(await overflows.drawn())).toHaveLength(1 + agents.length)
+  await overflows.unmount()
+  // 不畫小人（終端機以外的介面）：不多算空列，放得下就維持完整模式
+  const plainRows = rowCountOf(agents, { withMascot: false })
+  const desktop = await mount($, { surface: 'desktop', bodyRows: plainRows })
+  expect(drawnRows(await desktop.drawn())).toHaveLength(plainRows)
+  await desktop.unmount()
 })
 
 test('舊版存下、沒有 look 的列照常畫，小人是第一種造型', async ($, on) => {

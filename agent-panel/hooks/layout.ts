@@ -4,7 +4,7 @@
 import type { AgentRow, Batch } from '../types'
 import { agentLook, agentTokens, batchTotals } from './batch'
 import { MASCOT_COLUMNS, mascotRaster } from './mascot'
-import type { MascotState } from './mascot'
+import type { MascotSize, MascotState } from './mascot'
 import { contextPercent, modelInfo } from './pricing'
 import type { ModelFamily } from './pricing'
 
@@ -12,6 +12,10 @@ export type Span = { text: string; color?: string; isDim?: boolean; isBold?: boo
 
 // lines 是進度條以外的每一列；bar 是進度條每一格的顏色，完成與失敗的卡片沒有進度條（空陣列）
 export type Card = { lines: Span[][]; bar: string[] }
+
+// 完整模式的卡片左邊會不會畫小人
+export type FullModeOptions = { withMascot: boolean }
+export type GroupEntry = { kind: 'card'; agent: AgentRow } | { kind: 'blank' }
 
 type AgentStatus = AgentRow['status']
 type LineOptions = { columns: number; now: number; frame: number }
@@ -44,7 +48,13 @@ const STATUS_COUNTS: { status: AgentStatus; mark: string; color: string }[] = [
 ]
 // 每張卡片在完整模式佔幾列（執行中含進度條）；要跟 agentCard 畫出來的一致
 const CARD_ROWS: Record<AgentStatus, number> = { running: 5, failed: 3, done: 2 }
+// 小人的列數只看大小，跟造型、狀態、動畫拍數無關，各畫一次量出來
+const MASCOT_ROWS: Record<MascotSize, number> = {
+  large: mascotRaster({ look: 0, size: 'large', state: 'running', frame: 0 }).rows,
+  small: mascotRaster({ look: 0, size: 'small', state: 'done', frame: 0 }).rows,
+}
 const STATUS_LINE_ROWS = 1
+const BLANK_ROWS = 1
 
 const THINKING = '思考中'
 const INDENT = '  '
@@ -97,12 +107,26 @@ export function splitSections(batch: Batch): { running: AgentRow[]; failed: Agen
   return { running: withStatus('running'), failed: withStatus('failed'), done: withStatus('done') }
 }
 
-// 完整模式要幾列：狀態列，加上每個非空的組（組標題＋卡片），組與組之間空一列。
-// register.tsx 拿它跟面板可用列數比，放不下就改用 compactLine 一個子代理一列
-export function fullRowCount(batch: Batch): number {
-  const groupCount = Object.values(splitSections(batch)).filter(group => group.length > 0).length
-  const cardRows = batch.agents.reduce((sum, agent) => sum + CARD_ROWS[agent.status], 0)
-  return STATUS_LINE_ROWS + groupCount + cardRows + Math.max(0, groupCount - 1)
+// 完整模式要幾列：狀態列，加上每個非空的組（組標題＋卡片與卡片間的空列，見 groupEntries），組與組之間空一列。
+// register.tsx 拿它跟面板可用列數比，放不下就改用 compactLine 一個子代理一列；withMascot 要跟實際會不會畫小人一致
+export function fullRowCount(batch: Batch, options: FullModeOptions): number {
+  const groups = Object.values(splitSections(batch)).filter(group => group.length > 0)
+  const entryRows = groups
+    .flatMap(group => groupEntries(group, options))
+    .reduce((sum, entry) => sum + (entry.kind === 'card' ? CARD_ROWS[entry.agent.status] : BLANK_ROWS), 0)
+  return STATUS_LINE_ROWS + groups.length + entryRows + Math.max(0, groups.length - 1)
+}
+
+// 一組裡依序要畫的東西：卡片，或卡片之間的一列空白。
+// 畫小人時，卡片不比小人高（目前是 2 列的完成卡片配 2 列的小小人），小人就佔滿卡片的上下緣，
+// 同組下一張卡片的小人會直接接上來，看起來像一隻很高的小人，所以兩張之間空一列；比小人高的卡片底下本來就有空隙。
+// 組的第一張之前、最後一張之後不加：那裡已經是組名、組間空行或面板底部
+export function groupEntries(agents: readonly AgentRow[], options: FullModeOptions): GroupEntry[] {
+  return agents.flatMap((agent, index): GroupEntry[] => {
+    const hasNext = index < agents.length - 1
+    const mascotFillsCard = options.withMascot && CARD_ROWS[agent.status] <= MASCOT_ROWS[mascotSize(agent)]
+    return [{ kind: 'card', agent }, ...(hasNext && mascotFillsCard ? [{ kind: 'blank' } as const] : [])]
+  })
 }
 
 // 執行中 4 列＋進度條；完成 2 列、失敗 3 列，都不畫進度條
@@ -147,10 +171,14 @@ export function mascotLayout(bodyColumns: number): { withMascot: boolean; textCo
 export function agentMascot(row: AgentRow, options: { now: number; frame: number }): { columns: number; rows: number; cells: string } {
   return mascotRaster({
     look: agentLook(row),
-    size: row.status === 'running' ? 'large' : 'small',
+    size: mascotSize(row),
     state: mascotState(row, options.now),
     frame: options.frame,
   })
+}
+
+function mascotSize(row: AgentRow): MascotSize {
+  return row.status === 'running' ? 'large' : 'small'
 }
 
 // 跟卡片用同一個卡住判斷：卡住時進度條變黃，小人也停下變黃

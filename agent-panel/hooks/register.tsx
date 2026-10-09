@@ -13,6 +13,7 @@ import {
   compactLine,
   describeTool,
   fullRowCount,
+  groupEntries,
   mascotLayout,
   splitSections,
   statusLine,
@@ -348,11 +349,13 @@ export const register: Register = on => {
       const now = await $.clock.now()
       const options = { columns, now, frame }
       const { running, failed, done } = splitSections(batch)
-      // 放在輸入框上方時會擠掉對話的空間；完整模式要捲動才看得完時，也改成一個子代理一列
-      const isCompact = e.props.placement === 'inline' || fullRowCount(batch) > e.props.scroll.bodyRows
-      // 小人只畫在完整模式，而且面板要夠寬、拿得到 Raster；不畫時卡片照舊用整個寬度
+      // 小人只畫在完整模式（精簡模式不用 cardView），而且面板要夠寬、拿得到 Raster；不畫時卡片照舊用整個寬度
       const { withMascot, textColumns } = mascotLayout(columns)
-      const MascotRaster = !isCompact && withMascot ? Raster : undefined
+      const MascotRaster = withMascot ? Raster : undefined
+      // 畫小人時卡片之間可能多空幾列，算列數要照實際會不會畫
+      const fullModeOptions = { withMascot: MascotRaster !== undefined }
+      // 放在輸入框上方時會擠掉對話的空間；完整模式要捲動才看得完時，也改成一個子代理一列
+      const isCompact = e.props.placement === 'inline' || fullRowCount(batch, fullModeOptions) > e.props.scroll.bodyRows
       const cardOptions = { ...options, columns: MascotRaster === undefined ? columns : textColumns }
       const cardRows = (agent: AgentRow) => {
         const card = agentCard(agent, cardOptions)
@@ -375,13 +378,16 @@ export const register: Register = on => {
         { label: 'Failed', agents: failed },
         { label: 'Done', agents: done },
       ].filter(group => group.agents.length > 0)
+      // 空一列放一個空白字元：跟其他列一樣是一個 Text，不用 margin，列數才跟 fullRowCount 對得上
+      const blankRow = () => <Text> </Text>
       const body = isCompact
         ? [...running, ...failed, ...done].map(agent => spanRow(compactLine(agent, options)))
         : groups.flatMap((group, index) => [
-            // 組與組之間空一列（放一個空白字元）
-            ...(index > 0 ? [<Text> </Text>] : []),
+            // 組與組之間空一列
+            ...(index > 0 ? [blankRow()] : []),
             <Text dimColor>{group.label}</Text>,
-            ...group.agents.flatMap(cardView),
+            // 同組卡片之間要不要空一列（小人跟卡片一樣高時）由 groupEntries 決定，fullRowCount 也照它算
+            ...groupEntries(group.agents, fullModeOptions).flatMap(entry => (entry.kind === 'blank' ? [blankRow()] : cardView(entry.agent))),
           ])
 
       return (

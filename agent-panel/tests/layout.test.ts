@@ -198,11 +198,43 @@ test('精簡模式放不下：先截描述、再截動作，耗時保留，寬�
 })
 
 test('完整模式需要的列數：狀態列、各組標題與卡片（執行中 5、失敗 3、完成 2）、組間空行', () => {
-  expect(fullRowCount(batchOf())).toBe(1)
-  expect(fullRowCount(batchOf(row({ id: 'd', status: 'done' })))).toBe(1 + 1 + 2)
-  expect(fullRowCount(batchOf(row({ id: 'r1' }), row({ id: 'r2' })))).toBe(1 + 1 + 5 * 2)
+  const plain = { withMascot: false }
+  expect(fullRowCount(batchOf(), plain)).toBe(1)
+  expect(fullRowCount(batchOf(row({ id: 'd', status: 'done' })), plain)).toBe(1 + 1 + 2)
+  expect(fullRowCount(batchOf(row({ id: 'r1' }), row({ id: 'r2' })), plain)).toBe(1 + 1 + 5 * 2)
   const mixed = batchOf(row({ id: 'r' }), row({ id: 'f', status: 'failed' }), row({ id: 'd1', status: 'done' }), row({ id: 'd2', status: 'done' }))
-  expect(fullRowCount(mixed)).toBe(1 + (1 + 5) + 1 + (1 + 3) + 1 + (1 + 2 * 2))
+  expect(fullRowCount(mixed, plain)).toBe(1 + (1 + 5) + 1 + (1 + 3) + 1 + (1 + 2 * 2))
+})
+
+const doneRow = (id: string) => row({ id, status: 'done', endedAt: 5000 })
+const failedRow = (id: string) => row({ id, status: 'failed', failureReason: '已中斷', endedAt: 9000 })
+
+test('畫小人時，同組相鄰的完成卡片之間空一列：2 張多 1 列、3 張多 2 列；不畫小人時不加', () => {
+  const twoDone = batchOf(doneRow('d1'), doneRow('d2'))
+  expect(fullRowCount(twoDone, { withMascot: false })).toBe(1 + 1 + 2 * 2)
+  expect(fullRowCount(twoDone, { withMascot: true })).toBe(1 + 1 + 2 * 2 + 1)
+  const threeDone = batchOf(doneRow('d1'), doneRow('d2'), doneRow('d3'))
+  expect(fullRowCount(threeDone, { withMascot: false })).toBe(1 + 1 + 2 * 3)
+  expect(fullRowCount(threeDone, { withMascot: true })).toBe(1 + 1 + 2 * 3 + 2)
+  // 只有一張完成卡片：前後都不加
+  expect(fullRowCount(batchOf(doneRow('d')), { withMascot: true })).toBe(1 + 1 + 2)
+})
+
+test('畫小人時，執行中與失敗卡片比小人高，相鄰之間不加空列；組與組之間照舊只空一列', () => {
+  const batch = batchOf(row({ id: 'r1' }), row({ id: 'r2' }), failedRow('f1'), failedRow('f2'), doneRow('d'))
+  const expected = 1 + (1 + 5 * 2) + 1 + (1 + 3 * 2) + 1 + (1 + 2)
+  expect(fullRowCount(batch, { withMascot: true })).toBe(expected)
+  expect(fullRowCount(batch, { withMascot: false })).toBe(expected)
+})
+
+test('要不要空列看卡片與小人實際畫出來的列數：卡片不比小人高才空', () => {
+  const options = { columns: 40, now: 20_000, frame: 0 }
+  const rowsOf = (card: { lines: Span[][]; bar: string[] }) => card.lines.length + (card.bar.length > 0 ? 1 : 0)
+  for (const agent of [row(), failedRow('f'), doneRow('d')]) {
+    const pair = batchOf({ ...agent, id: 'x1' }, { ...agent, id: 'x2' })
+    const added = fullRowCount(pair, { withMascot: true }) - fullRowCount(pair, { withMascot: false })
+    expect(added).toBe(rowsOf(agentCard(agent, options)) <= agentMascot(agent, options).rows ? 1 : 0)
+  }
 })
 
 test('卡片實際列數與 fullRowCount 用的一致', () => {
