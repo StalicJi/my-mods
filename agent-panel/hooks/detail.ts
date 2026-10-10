@@ -83,7 +83,8 @@ function toolRows(entry: ToolEntry, time: string, layout: RowLayout): Span[][] {
   }
   const hasReason = entry.errorLine !== null && (entry.outcome === 'error' || entry.outcome === 'denied')
   if (!hasReason) return [first]
-  return [first, [{ text: ' '.repeat(prefixWidth) }, { text: fitToWidth(entry.errorLine ?? '', layout.columns - prefixWidth), color }]]
+  // 原因列用淡色（淡紅、淡黃），跟上面那一列的圖示分出主次
+  return [first, [{ text: ' '.repeat(prefixWidth) }, { text: fitToWidth(entry.errorLine ?? '', layout.columns - prefixWidth), color, isDim: true }]]
 }
 
 // 中途訊息：連續空白合成一個，包成「」後換行，最多 3 列，放不下時第 3 列結尾換成 …」
@@ -127,23 +128,47 @@ function wrapCached(text: string, width: number): string[] {
   return lines
 }
 
+// 連續的英數字與半形符號（不含空白）是一個詞，連續空白是一段，其他字元（中文、全形標點、emoji）各自一段
+const WRAP_TOKEN = /[!-~]+| +|[^]/gu
+
+// 英數字的詞放不下就整個換到下一列，比一列還長才硬切；換行後的開頭不留空白，段落本身開頭的縮排保留
 function wrapParagraph(paragraph: string, width: number): string[] {
   if (paragraph === '') return ['']
   const lines: string[] = []
   let line = ''
   let lineWidth = 0
-  for (const char of paragraph) {
+  const breakLine = () => {
+    lines.push(line.replace(/ +$/, ''))
+    line = ''
+    lineWidth = 0
+  }
+  // 一列至少放一個字，寬度比字還窄時也不會無限迴圈
+  const putChar = (char: string) => {
     const charWidth = displayWidth(char)
-    // 一列至少放一個字，寬度比字還窄時也不會無限迴圈
-    if (lineWidth + charWidth > width && line !== '') {
-      lines.push(line)
-      line = ''
-      lineWidth = 0
-    }
+    if (lineWidth + charWidth > width && line !== '') breakLine()
     line += char
     lineWidth += charWidth
   }
-  lines.push(line)
+  for (const token of paragraph.match(WRAP_TOKEN) ?? []) {
+    const tokenWidth = displayWidth(token)
+    if (token.startsWith(' ')) {
+      // 換行後的開頭不放空白；放不下的空白直接換行
+      if (line === '' && lines.length > 0) continue
+      if (lineWidth + tokenWidth > width) breakLine()
+      else {
+        line += token
+        lineWidth += tokenWidth
+      }
+    } else if (token.length > 1 && lineWidth + tokenWidth > width && tokenWidth <= width) {
+      // 英數字的詞放不下，但一列放得下：整個換到下一列
+      breakLine()
+      line = token
+      lineWidth = tokenWidth
+    } else {
+      for (const char of token) putChar(char)
+    }
+  }
+  lines.push(line.replace(/ +$/, ''))
   return lines
 }
 

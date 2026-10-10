@@ -101,3 +101,29 @@ test('detailLayout 的 newestRow 指向最新一筆的第一列（算進已省�
   expect(layout.newestRow).toBe(layout.rows.length - 2)
   expect(detailLayout({ entries: [], dropped: 0 }, options).newestRow).toBe(-1)
 })
+
+test('錯誤與被拒絕的原因列是淡色（淡紅、淡黃）', () => {
+  const rows = detailRows({ entries: [tool(1000, '讀取 a', 'error', 'File does not exist'), tool(2000, '執行：rm', 'denied', '不允許')], dropped: 0 }, options)
+  expect(rows[1]!.at(-1)).toMatchObject({ text: 'File does not exist', color: 'error', isDim: true })
+  expect(rows[3]!.at(-1)).toMatchObject({ text: '不允許', color: 'warning', isDim: true })
+})
+
+test('wrapToWidth：英數字詞不在中間切開，放不下就整個換到下一列，續行開頭不留空白', () => {
+  expect(wrapToWidth('File does not exist. Note: your current working directory', 20)).toEqual([
+    'File does not exist.',
+    'Note: your current',
+    'working directory',
+  ])
+  expect(wrapToWidth('說明這是個人使用的 Claude Code mod marketplace，只放通用程式碼', 20)).toEqual([
+    '說明這是個人使用的',
+    'Claude Code mod',
+    'marketplace，只放通',
+    '用程式碼',
+  ])
+  expect(wrapToWidth('aaaa bbbb', 4)).toEqual(['aaaa', 'bbbb'])
+})
+
+test('wrapToWidth：比一列還長的詞才硬切；段落本身開頭的縮排保留', () => {
+  expect(wrapToWidth('a'.repeat(25), 10)).toEqual(['a'.repeat(10), 'a'.repeat(10), 'a'.repeat(5)])
+  expect(wrapToWidth('  - 項目', 20)).toEqual(['  - 項目'])
+})
