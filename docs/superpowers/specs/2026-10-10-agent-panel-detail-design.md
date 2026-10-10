@@ -1,7 +1,7 @@
 # agent-panel 子代理詳細頁設計
 
 - 日期：2026-10-10
-- 狀態：設計已確認，待寫實作計畫
+- 狀態：已實作（2026-10-10）；實作與實機驗證後改了開啟位置、紀錄的存法與訊息順序，見文末「2026-10-10 實作與實機驗證後的修正」
 - 位置：`my-mods/agent-panel/`（在現有 mod 上加功能，原設計見 `2026-10-09-agent-panel-design.md`）
 
 ## 目的
@@ -20,6 +20,7 @@ Claude Code 沒有開放 mod 切換到原生的子代理畫面（`$.agent` 只�
 | 保留上限 | 每個子代理最多 100 筆；訊息存前 2,000 字；回報存前 20,000 字 |
 | 時間格式 | 相對時間 `+分:秒`（從子代理開始算），滿 1 小時是 `+時:分:秒` |
 | 哪裡能點 | 只有面板停靠右邊時；放在輸入框上方時維持現狀 |
+| 開啟位置 | 點開時捲到最新一筆的開頭；最下面也放一個「← 返回」（2026-10-10 實機驗證後使用者選定） |
 
 不讀紀錄檔（`~/.claude/projects/<專案>/<session>/subagents/agent-<id>.jsonl`）的原因：檔案很大（只等待 150 秒的示範子代理就有 290KB），是沒有文件的內部格式，即時更新要輪詢重新解析。代價是只記得到 mod 載入之後的事。
 
@@ -30,7 +31,7 @@ Claude Code 沒有開放 mod 切換到原生的子代理畫面（`$.agent` 只�
 - 工具的完整輸出（出錯時只留錯誤訊息第一行）
 - 思考內容（API 拿不到）
 - 面板在輸入框上方時的詳細頁
-- 跨批次的歷史紀錄（新的一批開始就丟掉舊的）
+- 已結束子代理的跨批次紀錄（新的一批開始就刪掉；還在跑、被帶進新批次的保留）
 
 ## 前提（來自 Claude Code 2.1.296 的 mod API）
 
@@ -76,8 +77,8 @@ export type LogEntry =
 // dropped：超過 100 筆時從最舊的丟掉了幾筆
 export type AgentLog = { entries: LogEntry[]; dropped: number }
 
-// turnId 跟 batch 的不同就是舊資料，下一次寫入直接換掉
-export type Logs = { turnId: string; byAgent: Record<string, AgentLog> }
+// 依 agentId 存；換批次時只刪掉沒被帶進新批次的子代理（跨回合的背景子代理保留紀錄）
+export type Logs = { byAgent: Record<string, AgentLog> }
 ```
 
 `PluginState['agent-panel']` 新增：
@@ -94,10 +95,10 @@ export type Logs = { turnId: string; byAgent: Record<string, AgentLog> }
 | 事件 | 記錄 |
 |---|---|
 | 子代理的 `tool.call`（`SubagentHandback` 以外） | 呼叫前加一筆 `tool`，`outcome: 'running'`；等 `next(e)` 回來後依結果改成 `ok`、`error`（`isError`）或 `denied`（`deny`），出錯與被拒絕時存錯誤第一行 |
-| 子代理的 `SubagentHandback` | 加一筆 `report`，文字取回報參數；不另外記成工具 |
-| 子代理 `turn.step` 的結果，`answer` 不是空的 | 那一步沒有要求工具、而且這個子代理還沒有 `report`：記成 `report`（這是直接回覆的最後答案）；其他情況記成 `message` |
+| 子代理的 `SubagentHandback` | 加一筆 `report`，文字取參數 `message`（沒有時取第一個字串參數）；不另外記成工具，卡片的工具次數照舊 |
+| 子代理 `turn.step` 的結果，`answer` 不是空的 | 那一步沒有要求工具、`stopReason` 是 `end_turn`、而且這個子代理還沒有 `report`：記成 `report`（直接回覆的最後答案）；其他情況記成 `message`。時間用那一步**開始**的時間，插在那一步開始之後才開始的紀錄前面（Claude Code 在回應串流時就先執行工具，工具紀錄會比訊息先寫進來） |
 | 子代理的 `turn.complete` | 還在 `running` 的工具改成 `unfinished` |
-| 新的一批開始（`recordSpawn` 的 `isNewBatch`） | `selected` 清空；`logs` 因 `turnId` 不同，下一次寫入換掉 |
+| 新的一批開始（`recordSpawn` 的 `isNewBatch`） | `selected` 清空；舊批次裡沒被帶進新批次的子代理用 `forgetAgents` 刪掉紀錄，被帶過去的（還在跑的背景子代理）保留 |
 | `session.end` 的 `clear` | `logs`、`selected` 跟 `batch` 一起清空 |
 
 文字處理：
@@ -105,6 +106,7 @@ export type Logs = { turnId: string; byAgent: Record<string, AgentLog> }
 - 訊息存前 2,000 字，回報存前 20,000 字（以字元計）。
 - 錯誤第一行：取第一個非空白行，去掉 `<tool_use_error>` 標籤與 ANSI 色碼（跟 clean-view 的處理一樣），最多 200 字。
 - 每個子代理超過 100 筆時從最舊的丟，`dropped` 加上丟掉的筆數。
+- 回報去重：子代理常在交回前把報告原文說一遍。訊息與回報照訊息上限截斷、`trim` 後相同時只留回報，不論兩者誰先記下。
 
 ## 版面
 
@@ -149,12 +151,13 @@ export type Logs = { turnId: string; byAgent: Record<string, AgentLog> }
 - 沒有任何紀錄時（例如熱重載前就在跑），顯示淡色「mod 載入前的紀錄沒有保留」。
 - 寬度算法沿用 `displayWidth`（中文字 2 欄）。
 - 子代理執行中面板每 0.2 秒重畫一次，回報最長可到幾百列，所以 `detail.ts` 的換行結果依「紀錄內容、寬度」快取，不每次重算。
+- 最新一筆的第一列包在 `key: 'newest'` 的 `Box` 裡（`Text` 沒有 key），點開時捲到這裡。紀錄之後空一列，最下面再放一個 `Button`「← 返回」（`key: 'back-bottom'`），捲在下面時也點得到。
 
 ## 互動
 
-- 點標題列：`selected` 設成那個 agentId，接著 `$.ui.scroll({ in: 'agent-panel', to: 'end' })` 捲到最新一筆。
-- 點「← 返回」：`selected` 清空。
-- 停在最底下時，新紀錄出現會跟著往下捲；往上捲去看舊紀錄時不會被拉回來。先靠終端機本身「跟著尾端」的行為，實作時驗證；不成立就用 `e.props.scroll.offset` 判斷上一次是否在最底下，是才捲到底。
+- 點標題列：`selected` 設成那個 agentId，接著 `$.ui.scroll({ in: 'agent-panel', to: { key: 'newest' }, block: 'start' })` 把最新一筆捲到面板頂端。詳細頁要等下一次重畫才出現，捲動被拒絕或拋錯時每 50 毫秒重試，最多 5 次。
+- 點「← 返回」（上下兩個都可以）：`selected` 清空。
+- 往上捲去看舊紀錄時，新紀錄出現不會被拉回來（2026-10-10 使用者實機確認），沒有另外處理。
 - 每次打開面板（新的一批自動開、`/agents` 打開）都從清單開始：`selected` 清空。
 - 面板什麼時候關閉不變：沒有子代理在跑時，使用者送出一般訊息就關閉。
 - `onPress` 只呼叫檔案最上層的函式（例如 `selectAgent($, agentId)`、`showList($)`）。
@@ -192,11 +195,26 @@ export type Logs = { turnId: string; byAgent: Record<string, AgentLog> }
 
 實機驗證（cmux 全螢幕、面板停靠右邊）：派一個示範子代理，讀幾個檔、故意讀一個不存在的檔、中途說一句話、最後交回報告。使用者負責點擊與往上捲動，Claude 用 `cmux read-screen` 檢查詳細頁內容、圖示、3 行截斷、完整回報與返回；往上捲之後有新紀錄時，確認不會被拉回最底下。
 
-## 實作時驗證的事
+## 實作時驗證的事（2026-10-10 結果）
 
-- `SubagentHandback` 的參數欄位名稱（用真實呼叫確認）。
-- 直接回覆的最後一步，`stopReason` 的實際值，以及「沒有要求工具」能不能可靠判斷最後答案。
-- `Button` 加 `plain` 包住多段帶顏色的 `Text` 時，外觀是否跟原本的標題列一致。
-- `onPress` 裡先寫 `selected` 再 `$.ui.scroll` 到底，捲動是否發生在詳細頁畫出來之後。
-- 終端機的「跟著尾端」是否成立；不成立就改用 `offset` 判斷。
-- 詳細頁裡的卡片畫圖片版小人是否正常（跟清單同一個 `Image` 畫法）。
+- `SubagentHandback` 的參數是 `message`（5 個真實子代理的紀錄都是）。
+- 最後答案：`stopReason` 是 `end_turn` 而且沒有要求工具。這個環境的子代理多半用 `SubagentHandback` 交回，交回後就結束。
+- `Button` 加 `plain` 包一個 `Text`：validate 接受，外觀跟原本的標題列一樣，不需要備案。
+- 寫 `selected` 後立刻捲到底：捲動發生在詳細頁畫出來之前，只捲到清單（實機看到 `← 返回` 被捲出、回報後段在畫面外）；已改成捲到 `newest` 並重試。點開停在最新一筆由使用者實機確認。
+- 往上捲時不被拉回：使用者實機確認。
+- 跨回合保留紀錄：示範子代理 B 還在跑時開新回合並派出 C，新批次只剩 B 與 C（已結束的 A 被刪掉）；B 的詳細頁捲到最頂端仍看得到「B 短等待 第 1 次」，使用者實機確認。
+- 背景用 `cmux read-screen` 輪詢偵測詳細頁時，有兩次在使用者點進面板操作後都認不出面板，原因沒查到；這兩項改由使用者肉眼確認。
+- 詳細頁的圖片版小人：`cmux read-screen` 看到 kitty 佔位字元 4×2，正常。
+- 測試套件的限制：按鈕處理函式裡沒有實作 `ui.scroll`；測試的 `$` 沒有 state 與 clock；state 替身寫入不會讓畫面重畫（測試在按下後呼叫 `ui.redraw()`）。所以 `scrollToNewest` 改成接收「捲動」與「等待」兩個函式，重試規則才能單獨測。
+
+## 2026-10-10 實作與實機驗證後的修正
+
+整體審查（Fable）與兩次 cmux 實機驗證找到三個問題，都先寫會失敗的測試再修：
+
+| 問題 | 原因 | 修法 |
+|---|---|---|
+| 派出新子代理時，還在跑的子代理紀錄被清掉；兩個子代理同時寫入時互相清掉 | `logs` 依 `turnId` 判斷新舊，但 `batchForTurn` 會把還在跑的子代理帶進新批次；寫入前在 `update` 外讀的 `turnId` 也可能是舊的 | `logs` 拿掉 `turnId`，只依 agentId 存；換批次時只刪沒被帶過去的 |
+| 子代理的一句話排在它要執行的工具後面 | 工具在回應串流時就先執行，比那一步的回覆文字先寫進來 | 訊息用那一步開始的時間，依時間插入；跟同一步的回報去重 |
+| 點開後只往下捲一列，`← 返回` 被捲出、回報後段在畫面外 | 捲動在詳細頁畫出來之前執行 | 捲到 `newest` 的開頭並重試；最下面多一個返回 |
+
+延後的 Minor（記在 ledger，使用者之後再挑）：`next(e)` 拋例外時工具一直顯示執行中；每次工具呼叫重複讀 batch；錯誤原因列沒有淡色；沒有變化也寫入造成多餘重畫；換行快取上限 50 小於 100 筆；測試留下沒用到的替身；`logs` 單一鍵的序列化成本；英數字在字中間被切開；最下面的返回整列可點容易誤觸。
