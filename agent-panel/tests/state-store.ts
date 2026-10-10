@@ -6,14 +6,21 @@ export function stateStore(on: any, initial: Record<string, unknown> = {}) {
   const writeCounts = new Map<string, number>()
   // mod 經 state.get 讀取的次數；用來確認清單畫面不讀 logs
   const readCounts = new Map<string, number>()
+  // 讀寫的先後順序（get:key、set:key），用來確認哪些寫入是平行進行的
+  const operations: string[] = []
+  // 寫入一律被拒絕的 key，模擬 host 寫入失敗
+  const failingKeys = new Set<string>()
   for (const [key, value] of Object.entries(initial)) held.set(key, { value, version: 1 })
   for (const key of ['batch', 'tick', 'logs', 'selected']) {
     const ref = { plugin: 'agent-panel', key }
     on('state.get', ref, () => {
       readCounts.set(key, (readCounts.get(key) ?? 0) + 1)
+      operations.push(`get:${key}`)
       return { value: { value: held.get(key)?.value, version: held.get(key)?.version ?? 0 } }
     })
     on('state.set', ref, (_$: any, e: any) => {
+      operations.push(`set:${key}`)
+      if (failingKeys.has(key)) return { deny: 'test: 寫入被拒絕' }
       const version = held.get(key)?.version ?? 0
       if (e.ifVersion !== undefined && e.ifVersion !== version) return { value: { isSet: false, version } }
       held.set(key, { value: e.value, version: version + 1 })
@@ -28,5 +35,7 @@ export function stateStore(on: any, initial: Record<string, unknown> = {}) {
     set: (key: string, value: unknown) => held.set(key, { value, version: (held.get(key)?.version ?? 0) + 1 }),
     writes: (key: string) => writeCounts.get(key) ?? 0,
     reads: (key: string) => readCounts.get(key) ?? 0,
+    operations: () => [...operations],
+    failWrites: (key: string) => failingKeys.add(key),
   }
 }

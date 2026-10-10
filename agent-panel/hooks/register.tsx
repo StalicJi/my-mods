@@ -70,6 +70,9 @@ let shownStatus: string | undefined | typeof STATUS_UNKNOWN = STATUS_UNKNOWN
 let forcesTerminalImages = false
 // 工具呼叫沒有 tool_use_id 時，用它產生紀錄 id
 let toolSequence = 0
+// 交回過報告的子代理：最後的回覆常跟報告相同（不重複記、不寫），只有它們的回覆要先讀 logs 確認有沒有變化；
+// 其他子代理的回覆一定會新增一筆，直接寫。熱重載後清空，最多多寫一次
+const agentsWithReport = new Set<string>()
 
 type SpawnFacts = { id: string; description: string; agentType: string; agentName: string | null; isNested: boolean }
 type FinishReason = 'answer' | 'aborted' | 'error' | 'refusal'
@@ -184,11 +187,18 @@ async function updateLogsIfChanged($: EngineInterface, change: (logs: Logs | nul
 }
 
 // 回傳寫入後的批次（update 會回傳它寫入的值）；沒有變化、沒寫時回傳 undefined。
-// 記錄子代理的更新函式找不到這個子代理時回傳原物件，所以 undefined 也代表它不在這一批
-async function updateBatchIfChanged($: EngineInterface, change: (batch: Batch | null) => Batch | null): Promise<Batch | null | undefined> {
+// 記錄子代理的更新函式找不到這個子代理時回傳原物件，所以 undefined 也代表它不在這一批。
+// alongside：確定要寫入後、跟寫入平行進行的工作（例如詳細頁的紀錄）；兩邊都做完才回傳，它出錯不影響批次的寫入
+async function updateBatchIfChanged(
+  $: EngineInterface,
+  change: (batch: Batch | null) => Batch | null,
+  alongside?: () => Promise<unknown>,
+): Promise<Batch | null | undefined> {
   const current = await read($, batchAtom)
   if (change(current) === current) return undefined
-  return update($, batchAtom, change)
+  const [written] = await Promise.allSettled([update($, batchAtom, change), alongside?.()])
+  if (written.status === 'rejected') throw written.reason
+  return written.value
 }
 
 // 下面的記錄都只觀察：出錯就略過這次，不影響子代理本身
@@ -236,20 +246,44 @@ async function recordStepUsage($: EngineInterface, agentId: string, step: { mode
   }
 }
 
-// 卡片顯示子代理目前在做什麼。回傳這次的摘要與時間，詳細頁的紀錄直接沿用，不再讀一次批次、算一次摘要；
-// 不在這一批（Claude Code 的內部 fork）或記錄失敗時回傳 null，詳細頁也不記
-async function recordTool($: EngineInterface, agentId: string, call: ToolCallInput): Promise<ToolStart | null> {
+// 卡片顯示子代理目前在做什麼；確定在這一批之後，詳細頁的紀錄（writeLog）跟寫入卡片平行進行，兩邊用同一份摘要與時間。
+// 不在這一批（Claude Code 的內部 fork）時兩邊都不寫；寫卡片失敗時紀錄照樣寫
+async function recordTool($: EngineInterface, agentId: string, call: ToolCallInput, writeLog: (start: ToolStart) => Promise<void>) {
   try {
     const start: ToolStart = { summary: describeTool(call.tool, call), at: await $.clock.now() }
-    const written = await updateBatchIfChanged($, batch => (batch === null ? batch : recordToolCall(batch, agentId, start.summary, start.at)))
-    if (written === undefined) return null
+    const written = await updateBatchIfChanged(
+      $,
+      batch => (batch === null ? batch : recordToolCall(batch, agentId, start.summary, start.at)),
+      () => writeLog(start),
+    )
+    if (written === undefined) return
     // 面板可能先在背景等待、終端機拉寬後才放上畫面，或被使用者按 ✕ 關掉，這些都沒有事件通知；
     // 趁工具呼叫補啟動動畫，或補上輸入框下方的狀態列（沿用剛寫入的批次，不再讀一次）
     if (timer === undefined) await syncTimerAndStatus($, written)
-    return start
   } catch {
-    return null
+    // 略過
   }
+}
+
+// 工具開始：卡片記下正在做什麼，詳細頁加一筆執行中的紀錄；回傳紀錄 id，結果回來時用它找回同一筆，沒記下時回傳 null
+async function recordToolStart($: EngineInterface, agentId: string, call: ToolCallInput): Promise<string | null> {
+  const id = call.tool_use_id ?? `${agentId}-${++toolSequence}`
+  let isLogged = false
+  await recordTool($, agentId, call, async start => {
+    await update($, logsAtom, logs => addToolStart(logs, agentId, { id, ...start }))
+    isLogged = true
+  })
+  return isLogged ? id : null
+}
+
+// 交回報告：卡片照樣算一次工具，詳細頁記成回報，不另外記成一筆工具
+async function recordHandback($: EngineInterface, agentId: string, call: ToolCallInput) {
+  const text = handbackText(call)
+  await recordTool($, agentId, call, async start => {
+    if (text === null) return
+    await update($, logsAtom, logs => addReport(logs, agentId, { at: start.at, text }))
+    agentsWithReport.add(agentId)
+  })
 }
 
 // 前景子代理完成時，主迴圈 Agent 工具的結果帶有 Claude Code 自己算的總計
@@ -279,27 +313,7 @@ async function recordFinish($: EngineInterface, agentId: string, reason: FinishR
   }
 }
 
-// 詳細頁的紀錄：只記這一批裡的子代理（Claude Code 的內部 fork 也帶 agentId，但不在這一批）。
-// 用在可能沒有變化的更新：最後的回覆常跟已交回的報告相同
-async function updateLog($: EngineInterface, agentId: string, change: (logs: Logs | null) => Logs | null) {
-  if (!(await isInBatch($, agentId))) return
-  await updateLogsIfChanged($, change)
-}
-
-// 下面三個只在 recordTool 確認過子代理在這一批之後呼叫，所以不再讀批次。
-// 執行中的子代理換批次時會被帶到新的一批，紀錄不會在工具跑到一半時被刪掉
-
-// 工具開始時加一筆執行中的紀錄；回傳紀錄 id，結果回來時用它找回同一筆
-async function recordToolStart($: EngineInterface, agentId: string, call: ToolCallInput, start: ToolStart): Promise<string | null> {
-  try {
-    const id = call.tool_use_id ?? `${agentId}-${++toolSequence}`
-    await update($, logsAtom, logs => addToolStart(logs, agentId, { id, ...start }))
-    return id
-  } catch {
-    return null
-  }
-}
-
+// 只在 recordToolStart 記下紀錄後呼叫，所以不再讀批次：執行中的子代理換批次時會被帶到新的一批，紀錄不會在工具跑到一半時被刪掉。
 // 結果回來時那一筆幾乎一定還在（只有工具執行期間又多出 100 筆、或被 /clear 清掉才找不到），所以不先讀 logs 確認有沒有變
 async function recordToolEnd($: EngineInterface, agentId: string, toolId: string, result: unknown) {
   try {
@@ -309,18 +323,14 @@ async function recordToolEnd($: EngineInterface, agentId: string, toolId: string
   }
 }
 
-async function recordReport($: EngineInterface, agentId: string, report: { at: number; text: string }) {
-  try {
-    await update($, logsAtom, logs => addReport(logs, agentId, report))
-  } catch {
-    // 略過
-  }
-}
-
-// answer.at 是這一步開始的時間：工具可能在回應串流時就先執行，訊息要排在它們前面
+// answer.at 是這一步開始的時間：工具可能在回應串流時就先執行，訊息要排在它們前面。
+// 交回過報告的子代理，這段話可能跟報告相同而沒有變化，才先讀 logs 確認；其他直接寫，每步只讀一次 logs
 async function recordAnswer($: EngineInterface, agentId: string, answer: { at: number; text: string; isFinal: boolean }) {
   try {
-    await updateLog($, agentId, logs => addAnswer(logs, agentId, answer))
+    if (!(await isInBatch($, agentId))) return
+    const change = (logs: Logs | null) => addAnswer(logs, agentId, answer)
+    if (agentsWithReport.has(agentId)) await updateLogsIfChanged($, change)
+    else await update($, logsAtom, change)
   } catch {
     // 略過
   }
@@ -434,6 +444,7 @@ export const register: Register = on => {
     if (e.reason === 'clear') {
       await updateBatchIfChanged($, () => null).catch(() => {})
       await updateLogsIfChanged($, () => null).catch(() => {})
+      agentsWithReport.clear()
       await showList($)
     }
     return next(e)
@@ -503,15 +514,13 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     if (e.agentId !== undefined) {
-      const start = await recordTool($, e.agentId, e)
-      // 交回報告：記成回報，不另外記成一筆工具。這個工具不在型別的內建工具清單裡，所以當成一般字串比較
+      // 交回報告這個工具不在型別的內建工具清單裡，所以當成一般字串比較
       const toolName: string = e.tool
       if (toolName === HANDBACK_TOOL) {
-        const text = handbackText(e)
-        if (start !== null && text !== null) await recordReport($, e.agentId, { at: start.at, text })
+        await recordHandback($, e.agentId, e)
         return next(e)
       }
-      const toolId = start === null ? null : await recordToolStart($, e.agentId, e, start)
+      const toolId = await recordToolStart($, e.agentId, e)
       let result: Awaited<ReturnType<typeof next>>
       try {
         result = await next(e)
@@ -534,6 +543,8 @@ export const register: Register = on => {
     if (e.agentId !== undefined) {
       await recordFinish($, e.agentId, e.reason)
       await recordUnfinished($, e.agentId)
+      // 結束後不會再有回覆
+      agentsWithReport.delete(e.agentId)
     }
     return next(e)
   })

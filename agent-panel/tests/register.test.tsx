@@ -800,3 +800,39 @@ test('不在這一批的 fork 走完一步、呼叫一次工具、結束，都�
   expect(control.state.writes('batch') - before).toBe(0)
 })
 
+
+test('子代理還沒交回報告時，每一步的回覆只讀 1 次 logs（不會跟報告重複，不先讀一次確認）', async ($, on) => {
+  const control = engine(on)
+  control.stepReplies.push({ answer: '先看設定檔', toolUses: [{ id: 'u', name: 'Read', input: {} }], stopReason: 'tool_use' })
+  await start($)
+  await spawnAgent($)
+  const before = control.state.reads('logs')
+  await step($, 'a1')
+  expect(control.state.reads('logs') - before).toBe(1)
+  expect(control.state.get('logs').byAgent.a1.entries.map((entry: any) => entry.kind)).toEqual(['message'])
+})
+
+test('子代理的工具開始與交回報告時，卡片與詳細頁紀錄平行寫入：卡片寫完之前就開始寫紀錄', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  for (const call of [
+    { tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'r1' },
+    { tool: 'SubagentHandback', message: '報告內容', agentId: 'a1' },
+  ]) {
+    const from = control.state.operations().length
+    await $.tool.call(call as any)
+    const operations = control.state.operations().slice(from)
+    expect(operations.indexOf('get:logs')).toBeGreaterThanOrEqual(0)
+    expect(operations.indexOf('get:logs')).toBeLessThan(operations.indexOf('set:batch'))
+  }
+})
+
+test('寫卡片失敗時，詳細頁的工具紀錄照樣寫，結果回來也會更新', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  control.state.failWrites('batch')
+  await $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'r1' } as any)
+  expect(control.state.get('logs').byAgent.a1.entries).toEqual([expect.objectContaining({ id: 'r1', outcome: 'ok' })])
+})
