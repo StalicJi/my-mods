@@ -54,7 +54,7 @@ export function detailRows(log: AgentLog, options: DetailOptions): Span[][] {
   return detailLayout(log, options).rows
 }
 
-// 依顯示寬度逐字硬切（中文 2 欄），'\n' 分段，空段落是空字串
+// 依顯示寬度換行（中文 2 欄）：中文逐字換，連續的英數字當成一個詞、不從中間切開（規則見 wrapParagraph）；'\n' 分段，空段落是空字串
 export function wrapToWidth(text: string, width: number): string[] {
   return text.split('\n').flatMap(paragraph => wrapParagraph(paragraph, width))
 }
