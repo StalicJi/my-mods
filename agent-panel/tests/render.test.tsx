@@ -165,6 +165,13 @@ test('完成與失敗的卡片沒有進度條，執行中的有', async ($, on) 
   await ui.unmount()
 })
 
+test('模型列：失敗卡片跟完成卡片一樣有 effort 與 token；工具 1 次寫 1 tool，三種卡片都一樣', async ($, on) => {
+  const ui = await mountWith($, on, [row('a', { toolCount: 1 }), failed('f', { toolCount: 1 }), done('d', { toolCount: 1 })])
+  const modelRows = drawnRows(await ui.drawn()).filter(line => line.includes('Opus 5.5'))
+  expect(modelRows).toEqual(['  Opus 5.5 · xhigh · 1 tool', '  Opus 5.5 · xhigh · 1 tool · 27k', '  Opus 5.5 · xhigh · 1 tool · 27k'])
+  await ui.unmount()
+})
+
 test('完整模式：列數等於 fullRowCount，組與組之間空一列，頭尾不空', async ($, on) => {
   const agents = [row('a'), failed('f'), done('d')]
   const ui = await mountWith($, on, agents)

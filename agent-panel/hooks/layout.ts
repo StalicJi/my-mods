@@ -144,15 +144,11 @@ export function agentCard(row: AgentRow, options: LineOptions): Card {
   const { columns } = options
   const title = titleLine(row, options)
   if (row.status === 'running') return runningCard(row, options, title)
-  if (row.status === 'done') {
-    return { lines: [title, modelLine(row, [...effortParts(row), toolsText(row), formatTokens(agentTokens(row))], columns)], bar: [] }
-  }
-  // 失敗：第二列寫失敗原因與停在哪一步
+  const summary = modelLine(row, finishedDetails(row), columns)
+  if (row.status === 'done') return { lines: [title, summary], bar: [] }
+  // 失敗：第二列寫失敗原因與停在哪一步，第三列跟完成卡片一樣
   const failure = [row.failureReason ?? '', row.activity].filter(part => part !== '').join(SEPARATOR)
-  return {
-    lines: [title, fitLine([{ text: INDENT }, { text: failure, color: 'error' }], columns), modelLine(row, [toolsText(row)], columns)],
-    bar: [],
-  }
+  return { lines: [title, fitLine([{ text: INDENT }, { text: failure, color: 'error' }], columns), summary], bar: [] }
 }
 
 function runningCard(row: AgentRow, options: LineOptions, title: Span[]): Card {
@@ -259,8 +255,13 @@ function effortParts(row: AgentRow): string[] {
   return row.effort === null ? [] : [String(row.effort)]
 }
 
+// 完成與失敗卡片的模型列細節：effort、工具次數、token
+function finishedDetails(row: AgentRow): string[] {
+  return [...effortParts(row), toolsText(row), formatTokens(agentTokens(row))]
+}
+
 function toolsText(row: AgentRow): string {
-  return `${row.toolCount} tools`
+  return row.toolCount === 1 ? '1 tool' : `${row.toolCount} tools`
 }
 
 // 正在做什麼與這一步的耗時；卡住時整列變 warning

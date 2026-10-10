@@ -148,12 +148,12 @@ test('完成卡片 2 列、沒有進度條：模型 · effort · tools · tokens
   expect(done.lines[1]![1]).toMatchObject({ text: 'Sonnet 5.5', color: '#6f7df2' })
 })
 
-test('失敗卡片 3 列、沒有進度條：失敗原因 · 停在哪一步（紅色）、模型 · tools', () => {
+test('失敗卡片 3 列、沒有進度條：失敗原因 · 停在哪一步（紅色）、模型 · effort · tools · tokens', () => {
   const failed = agentCard(row({ status: 'failed', failureReason: '已中斷', endedAt: 9000 }), { columns: 40, now: 20_000, frame: 0 })
   expect(failed.lines.map(text)).toEqual([
     spread('✗ Explore · Review the whole kit', '0:09', 40),
     '  已中斷 · 讀取 src/app.ts',
-    '  Opus 5.5 · 12 tools',
+    '  Opus 5.5 · xhigh · 12 tools · 27k',
   ])
   expect(failed.bar).toEqual([])
   expect(failed.lines[0]![0]).toMatchObject({ text: '✗ ', color: 'error' })
@@ -161,6 +161,35 @@ test('失敗卡片 3 列、沒有進度條：失敗原因 · 停在哪一步（�
   // 還沒用過工具就失敗：只寫失敗原因
   const early = agentCard(row({ status: 'failed', failureReason: 'API 錯誤', endedAt: 9000, activity: '' }), { columns: 40, now: 20_000, frame: 0 })
   expect(text(early.lines[1]!)).toBe('  API 錯誤')
+})
+
+test('失敗卡片最後一列跟完成卡片的模型列一樣：模型 · effort · tools · tokens，沒有 effort 時兩者都不寫', () => {
+  const options = { columns: 40, now: 20_000, frame: 0 }
+  const lastLines = (patch: Partial<AgentRow>) => [
+    text(agentCard(row({ ...patch, status: 'done', endedAt: 9000 }), options).lines.at(-1)!),
+    text(agentCard(row({ ...patch, status: 'failed', failureReason: '已中斷', endedAt: 9000 }), options).lines.at(-1)!),
+  ]
+  expect(lastLines({ reportedTokens: 26_400 })).toEqual(['  Opus 5.5 · xhigh · 12 tools · 26k', '  Opus 5.5 · xhigh · 12 tools · 26k'])
+  expect(lastLines({ effort: null })).toEqual(['  Opus 5.5 · 12 tools · 27k', '  Opus 5.5 · 12 tools · 27k'])
+  // 模型名照樣用系列色，細節暗色
+  const failed = agentCard(row({ status: 'failed', failureReason: '已中斷', endedAt: 9000 }), options)
+  expect(failed.lines[2]![1]).toMatchObject({ text: 'Opus 5.5', color: '#f79a4f' })
+  expect(failed.lines[2]![2]).toMatchObject({ isDim: true })
+})
+
+test('工具次數：1 次寫 1 tool，0 次與 2 次以上寫 N tools；執行中、完成、失敗卡片都一樣', () => {
+  const options = { columns: 40, now: 20_000, frame: 0 }
+  const cases: [number, string][] = [[0, '0 tools'], [1, '1 tool'], [2, '2 tools']]
+  for (const [toolCount, tools] of cases) {
+    const running = agentCard(row({ toolCount }), options)
+    const done = agentCard(row({ toolCount, status: 'done', endedAt: 9000 }), options)
+    const failed = agentCard(row({ toolCount, status: 'failed', failureReason: '已中斷', endedAt: 9000 }), options)
+    expect([text(running.lines[1]!), text(done.lines[1]!), text(failed.lines[2]!)]).toEqual([
+      `  Opus 5.5 · xhigh · ${tools}`,
+      `  Opus 5.5 · xhigh · ${tools} · 27k`,
+      `  Opus 5.5 · xhigh · ${tools} · 27k`,
+    ])
+  }
 })
 
 test('分組：Running、Failed、Done 三組，各組維持派出順序', () => {

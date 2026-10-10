@@ -1,14 +1,17 @@
 // 子代理卡片左邊的像素小人（圖片版）：跟 mascot.ts 的方塊字元版同一套造型、顏色、狀態與走路速度，
 // 改畫成 16×16 的 RGBA 圖交給 Image 元件（kitty 圖片協定），畫在 4 欄 × 2 列裡，像素細很多。
+// 交出去的是壓過的小 PNG 不是 RGBA：每張只有幾百個 base64 字元，kitty 一個序列就送完，原因見 png.ts。
 // 純函式、不 import claude-code；面板每 0.2 秒重畫，同一組（造型、狀態、腳的畫格）的圖只算一次
 
 import type { MascotState, Palette } from './mascot'
 import { ACCESSORY_PALETTES, EYE_COLOR, LOOK_COUNT, STATE_STYLES, WALK_STEP_FRAMES, toBase64, wrapIndex } from './mascot'
+import { encodePng } from './png'
 
 export const MASCOT_IMAGE_COLUMNS = 4
 export const MASCOT_IMAGE_ROWS = 2
 
-export type MascotImage = Readonly<{ rgba: string; width: number; height: number }>
+// Image 的 source：一個完整 PNG 的 base64
+export type MascotImage = Readonly<{ png: string }>
 type MascotImageOptions = { look: number; state: MascotState; frame: number }
 
 // 4 欄 × 2 列大約是正方形，畫布也用正方形，縮放才不會變形
@@ -162,7 +165,8 @@ export function mascotImage({ look, state, frame }: MascotImageOptions): MascotI
   const withEyes = overlay([...BODY_ROWS, ...legs], EYES[state], EYE_TOP)
   const pixels = overlay(withEyes, ACCESSORIES[lookIndex]!, 0)
   const palette: Palette = { ...ACCESSORY_PALETTES[lookIndex], [BODY]: STATE_STYLES[state].bodyColor, [EYE]: EYE_COLOR }
-  const image = Object.freeze({ rgba: toBase64(rasterize(pixels, palette)), width: IMAGE_SIZE, height: IMAGE_SIZE })
+  const png = encodePng({ pixels: rasterize(pixels, palette), width: IMAGE_SIZE, height: IMAGE_SIZE })
+  const image = Object.freeze({ png: toBase64(png) })
   imageCache.set(cacheKey, image)
   return image
 }
