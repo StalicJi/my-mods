@@ -623,12 +623,19 @@ export const register: Register = on => {
         const detail = detailLayout(agentLog(logs, selectedAgent.id), { columns, now, startedAt: selectedAgent.startedAt })
         const header = statusLine(batch, now, columns - displayWidth(BACK_LABEL) - 1).map(span => ({ ...span, isDim: true }))
         // 返回列、卡片（文字列＋進度條；小人不比卡片高）、分隔線、紀錄。超過面板可見列數時最上面的返回會被捲出去，
-        // 才在最下面再放一個；一頁放得下時兩個返回會同時出現，看起來重複
+        // 才在最下面再放一個；一頁放得下時兩個返回會同時出現，看起來重複。
+        // 最下面的返回包在跟文字一樣寬的 Box 裡：實機上 Button 自己的方框會涵蓋文字右邊的空白（游標移過去會反白、點了會返回），
+        // 而點擊只會往包含點擊位置的方框裡找，點在這個 Box 外面就碰不到 Button
         const card = agentCard(selectedAgent, cardOptions)
         const contentRows = 1 + card.lines.length + (card.bar.length > 0 ? 1 : 0) + 1 + detail.rows.length
         const bottomBack =
           contentRows > e.props.scroll.bodyRows
-            ? [blankRow(), <Button key="back-bottom" plain label={BACK_LABEL} onPress={() => showList($)} />]
+            ? [
+                blankRow(),
+                <Box width={displayWidth(BACK_LABEL)}>
+                  <Button key="back-bottom" plain label={BACK_LABEL} onPress={() => showList($)} />
+                </Box>,
+              ]
             : []
         return (
           <Box flexDirection="column">

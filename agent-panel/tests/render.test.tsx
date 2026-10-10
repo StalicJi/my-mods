@@ -684,3 +684,24 @@ test('內容一頁放得下時不顯示最下面的返回：9 列剛好放得下
   expect(await overflows.find({ key: 'back-bottom' })).toBeDefined()
   await overflows.unmount()
 })
+
+// 元件樹裡直接包著 key 這個子元件的那一層
+function parentOfKey(node: any, key: string): any {
+  if (!node || typeof node !== 'object') return undefined
+  const children = (node.children ?? []) as any[]
+  if (children.some(child => child?.props?.key === key)) return node
+  for (const child of children) {
+    const found = parentOfKey(child, key)
+    if (found !== undefined) return found
+  }
+  return undefined
+}
+
+// 點擊只會往包含點擊位置的方框裡找；實機上 Button 自己的方框會涵蓋文字右邊的空白（反白、點了會返回），
+// 所以外面包一個跟文字一樣寬的 Box，點在它外面就碰不到 Button
+test('最下面的返回包在跟文字一樣寬的 Box 裡，文字右邊的空白點了不會返回', async ($, on) => {
+  setup(on, [row('a', { startedAt: 0 })], { selected: 'a', logs: twoEntries })
+  const ui = await mount($, { bodyRows: 8 })
+  expect(parentOfKey(await ui.drawn(), 'back-bottom')?.props).toMatchObject({ width: displayWidth('← 返回') })
+  await ui.unmount()
+})
