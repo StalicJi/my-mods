@@ -20,6 +20,12 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
     // 代替 host 的窗格清單：開了就列出，關了就移除
     panes: [] as { id: string; title: string; isShown: boolean; isFocused: boolean; isPlaced: boolean }[],
     clock: mock.clock(on),
+    // tool.call（Agent 以外）依序回的結果，排完了回成功
+    toolReplies: [] as object[],
+    // 每次請求依序回的 answer、toolUses、stopReason，沒排就是只呼叫工具的空回覆
+    stepReplies: [] as { answer?: string; toolUses?: object[]; stopReason?: string }[],
+    // $.ui.scroll 收到的參數
+    scrolls: [] as unknown[],
   }
   on('prompt.submit', () => ({ text: '' }))
   on('session.end', () => ({ sessionId: 's' }))
@@ -35,11 +41,21 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
   on('agent.spawn', () => control.spawnReplies.shift() ?? { model: 'claude-opus-5-5', agentId: `a${++control.spawned}` })
   on('turn.step', async function* (_$: any, e: any) {
     if (e.agentId !== undefined) control.batchAtStep = control.state.get('batch')
-    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: { ...USAGE, model: e.model } }
+    const reply = control.stepReplies.shift() ?? {}
+    return {
+      turnId: e.turnId, index: e.index, answer: reply.answer ?? '', toolUses: reply.toolUses ?? [],
+      stopReason: reply.stopReason ?? 'end_turn', usage: { ...USAGE, model: e.model },
+    }
   })
   on('tool.call', (_$: any, e: any) =>
-    e.tool === 'Agent' ? { result: { agentId: 'a1', totalTokens: 26_000, totalToolUseCount: 12 }, text: '' } : { result: {}, text: 'ok' },
+    e.tool === 'Agent'
+      ? { result: { agentId: 'a1', totalTokens: 26_000, totalToolUseCount: 12 }, text: '' }
+      : control.toolReplies.shift() ?? { result: {}, text: 'ok' },
   )
+  on('ui.scroll', (_$: any, e: any) => {
+    control.scrolls.push(e)
+    return { value: {} }
+  })
   on('command.register', () => ({ value: undefined }))
   on('ui.open', (_$: any, e: any) => {
     control.opens.push(e)
@@ -423,4 +439,102 @@ test('session 結束時清掉狀態列，下一個 session 開始時再依批次
   expect((control.state.get('batch')).agents).toHaveLength(1)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/w' } as any)
   expect(control.statuses.at(-1)).toBe('Agents ●1')
+})
+
+test('子代理的工具呼叫記成紀錄，結果回來改成 ok、error、denied', async ($, on) => {
+  const control = engine(on)
+  control.toolReplies.push({ result: {}, text: 'ok' }, { result: {}, text: '<tool_use_error>File does not exist.</tool_use_error>', isError: true }, { deny: '不允許\n細節' })
+  await start($)
+  await spawnAgent($)
+  await control.clock.advance(4000)
+  await $.tool.call({ tool: 'Read', file_path: '/w/src/app.ts', agentId: 'a1', tool_use_id: 'r1' } as any)
+  await $.tool.call({ tool: 'Read', file_path: '/w/x.ts', agentId: 'a1', tool_use_id: 'r2' } as any)
+  await $.tool.call({ tool: 'Bash', command: 'rm -rf /', agentId: 'a1', tool_use_id: 'r3' } as any)
+  const logs = control.state.get('logs')
+  expect(logs.turnId).toBe('t1')
+  expect(logs.byAgent.a1.entries).toEqual([
+    { kind: 'tool', id: 'r1', at: 4000, summary: '讀取 src/app.ts', outcome: 'ok', errorLine: null },
+    { kind: 'tool', id: 'r2', at: 4000, summary: '讀取 w/x.ts', outcome: 'error', errorLine: 'File does not exist.' },
+    { kind: 'tool', id: 'r3', at: 4000, summary: '執行：rm -rf /', outcome: 'denied', errorLine: '不允許' },
+  ])
+})
+
+test('SubagentHandback 記成回報，不記成工具；卡片的工具次數照舊累加', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  await $.tool.call({ tool: 'SubagentHandback', message: '報告內容', agentId: 'a1' } as any)
+  expect(control.state.get('logs').byAgent.a1.entries).toEqual([{ kind: 'report', at: 0, text: '報告內容' }])
+  expect(control.state.get('batch').agents[0].toolCount).toBe(1)
+})
+
+test('SubagentHandback 沒有 message 欄位時，取第一個字串參數當回報', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  await $.tool.call({ tool: 'SubagentHandback', report: '另一種欄位', agentId: 'a1' } as any)
+  expect(control.state.get('logs').byAgent.a1.entries).toEqual([{ kind: 'report', at: 0, text: '另一種欄位' }])
+})
+
+test('子代理的 answer 記成訊息；沒有要求工具而且 end_turn 時記成回報', async ($, on) => {
+  const control = engine(on)
+  control.stepReplies.push({ answer: '先看設定檔', toolUses: [{ id: 'u', name: 'Read', input: {} }], stopReason: 'tool_use' }, { answer: '結論', toolUses: [], stopReason: 'end_turn' })
+  await start($)
+  await spawnAgent($)
+  await step($, 'a1')
+  await step($, 'a1')
+  expect(control.state.get('logs').byAgent.a1.entries.map((entry: any) => [entry.kind, entry.text])).toEqual([['message', '先看設定檔'], ['report', '結論']])
+})
+
+test('主迴圈與不在這一批的 agentId 不寫 logs', async ($, on) => {
+  const control = engine(on)
+  control.stepReplies.push({ answer: '主迴圈的話' }, { answer: 'fork 的話' })
+  await start($)
+  await spawnAgent($)
+  await step($)
+  await step($, 'internal-fork')
+  await $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'internal-fork' } as any)
+  expect(control.state.writes('logs')).toBe(0)
+})
+
+test('平行的兩個子代理同時呼叫工具，紀錄都在', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  await spawnAgent($)
+  await Promise.all([
+    $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'x1' } as any),
+    $.tool.call({ tool: 'Read', file_path: '/w/b.ts', agentId: 'a2', tool_use_id: 'x2' } as any),
+  ])
+  const logs = control.state.get('logs')
+  expect(logs.byAgent.a1.entries).toHaveLength(1)
+  expect(logs.byAgent.a2.entries).toHaveLength(1)
+})
+
+test('子代理結束時還在 running 的工具改成 unfinished', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  control.state.set('logs', { turnId: 't1', byAgent: { a1: { entries: [{ kind: 'tool', id: 'r1', at: 0, summary: '讀取 a', outcome: 'running', errorLine: null }], dropped: 0 } } })
+  await $.turn.complete({ reason: 'aborted', answer: '', durationMs: 1, agentId: 'a1', turnId: 'x' } as any)
+  expect(control.state.get('logs').byAgent.a1.entries[0].outcome).toBe('unfinished')
+})
+
+test('新的一批與 /agents 打開時 selected 清空；/clear 清空 logs 與 selected', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  control.state.set('selected', 'a1')
+  await $.turn.start({ text: '再來', turnId: 't2' })
+  await spawnAgent($)
+  expect(control.state.get('selected')).toBeNull()
+  control.state.set('selected', 'a2')
+  await $.command.run({ command: 'agents', args: '' } as any) // 開著 → 關
+  await $.command.run({ command: 'agents', args: '' } as any) // 關著 → 開
+  expect(control.state.get('selected')).toBeNull()
+  control.state.set('selected', 'a2')
+  await $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a2' } as any)
+  await $.session.end({ reason: 'clear' } as any)
+  expect(control.state.get('logs')).toBeNull()
+  expect(control.state.get('selected')).toBeNull()
 })

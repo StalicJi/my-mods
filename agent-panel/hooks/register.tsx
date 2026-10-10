@@ -3,8 +3,10 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer, ToolCallInput } from 'claude-code'
 
-import type { AgentRow, Batch, TokenUsage } from '../types'
+import type { AgentRow, Batch, Logs, TokenUsage } from '../types'
 import { addAgent, finishAgent, hasRunning, recordReported, recordStep, recordThinking, recordToolCall, seedRunning } from './batch'
+import { addAnswer, addReport, addToolStart, finishTool, markUnfinished, toolEndOf } from './log'
+import type { LogTarget } from './log'
 import {
   MASCOT_GAP,
   agentCard,
@@ -37,8 +39,17 @@ const STATUS_UNKNOWN = Symbol('status-unknown')
 const batchAtom = atom({ plugin: 'agent-panel', key: 'batch' } as const, null as Batch | null)
 // 動畫計數器，只有面板讀，所以動畫只會讓面板重畫；不用 $.ui.invalidate，那會讓整個對話紀錄重跑
 const tickAtom = atom({ plugin: 'agent-panel', key: 'tick' } as const, 0)
+// 詳細頁的紀錄；清單不讀它，新增紀錄不會讓清單重畫
+const logsAtom = atom({ plugin: 'agent-panel', key: 'logs' } as const, null as Logs | null)
+// 目前打開詳細頁的 agentId
+const selectedAtom = atom({ plugin: 'agent-panel', key: 'selected' } as const, null as string | null)
 
-// 下面五個是模組自己的變數，熱重載後重來
+// 子代理交回報告用的工具；報告文字在參數 message
+const HANDBACK_TOOL = 'SubagentHandback'
+// 找報告文字時略過的 tool.call 欄位（不是工具參數）
+const CALL_FIELDS = new Set(['tool', 'agentId', 'tool_use_id', 'consent'])
+
+// 下面幾個是模組自己的變數，熱重載後重來
 // 目前主回合的 turnId；歸零時沿用現有批次
 let currentTurnId: string | null = null
 // 窗格放不下的提示每個 session 最多一次
@@ -48,12 +59,16 @@ let timer: Timer | undefined
 let shownStatus: string | undefined | typeof STATUS_UNKNOWN = STATUS_UNKNOWN
 // 有沒有設 CLAUDE_CODE_FORCE_TERMINAL_IMAGES：session.start 讀一次（熱重載也會重跑），不在每次重畫時讀；還沒讀到之前當成沒設
 let forcesTerminalImages = false
+// 工具呼叫沒有 tool_use_id 時，用它產生紀錄 id
+let toolSequence = 0
 
 type SpawnFacts = { id: string; description: string; agentType: string; agentName: string | null; isNested: boolean }
 type FinishReason = 'answer' | 'aborted' | 'error' | 'refusal'
 
 // mod 自己開的窗格要終端機夠寬才放得下（使用者親手開過後門檻較低）；放不下時窗格在背景等，提示一次怎麼開
 export async function openPanel($: EngineInterface): Promise<void> {
+  // 每次打開面板都從清單開始
+  await showList($)
   const opened = await $.ui.open({ id: PANE_ID, title: PANE_TITLE, columns: PANE_COLUMNS })
   if (!opened.isPlaced && !hasWarnedNarrow) {
     hasWarnedNarrow = true
@@ -225,6 +240,82 @@ async function recordFinish($: EngineInterface, agentId: string, reason: FinishR
   }
 }
 
+// 詳細頁的紀錄：用這一批的 turnId 寫入；不在這一批的 agentId（例如 Claude Code 的內部 fork）不寫
+async function updateLog($: EngineInterface, agentId: string, change: (logs: Logs | null, target: LogTarget) => Logs) {
+  const batch = await read($, batchAtom)
+  if (batch === null || !batch.agents.some(agent => agent.id === agentId)) return
+  const target = { turnId: batch.turnId, agentId }
+  await update($, logsAtom, logs => change(logs, target))
+}
+
+// 工具開始時加一筆執行中的紀錄；回傳紀錄 id，結果回來時用它找回同一筆
+async function recordToolStart($: EngineInterface, agentId: string, call: ToolCallInput): Promise<string | null> {
+  try {
+    if (!(await isInBatch($, agentId))) return null
+    const id = call.tool_use_id ?? `${agentId}-${++toolSequence}`
+    const at = await $.clock.now()
+    await updateLog($, agentId, (logs, target) => addToolStart(logs, target, { id, at, summary: describeTool(call.tool, call) }))
+    return id
+  } catch {
+    return null
+  }
+}
+
+async function recordToolEnd($: EngineInterface, agentId: string, toolId: string, result: unknown) {
+  try {
+    await updateLog($, agentId, (logs, target) => finishTool(logs, target, toolId, toolEndOf(result)))
+  } catch {
+    // 略過
+  }
+}
+
+async function recordReport($: EngineInterface, agentId: string, text: string) {
+  try {
+    const at = await $.clock.now()
+    await updateLog($, agentId, (logs, target) => addReport(logs, target, { at, text }))
+  } catch {
+    // 略過
+  }
+}
+
+async function recordAnswer($: EngineInterface, agentId: string, answer: { text: string; isFinal: boolean }) {
+  try {
+    const at = await $.clock.now()
+    await updateLog($, agentId, (logs, target) => addAnswer(logs, target, { at, ...answer }))
+  } catch {
+    // 略過
+  }
+}
+
+// 子代理結束時結果還沒回來的工具（中斷、失敗、熱重載）不會再更新，標成未完成
+async function recordUnfinished($: EngineInterface, agentId: string) {
+  try {
+    await updateLog($, agentId, (logs, target) => markUnfinished(logs, target))
+  } catch {
+    // 略過
+  }
+}
+
+// 回到清單。update 就算拿回同一個值也會寫一次、讓面板重畫，所以已經是清單就不寫
+export async function showList($: EngineInterface): Promise<void> {
+  try {
+    if ((await read($, selectedAtom)) === null) return
+    await update($, selectedAtom, () => null)
+  } catch {
+    // 略過
+  }
+}
+
+// 報告文字在 message；欄位名稱改了時退回取第一個字串參數，不讓回報整個消失
+function handbackText(call: ToolCallInput): string | null {
+  const fields = call as unknown as Record<string, unknown>
+  if (typeof fields.message === 'string') return fields.message
+  for (const [key, value] of Object.entries(fields)) {
+    if (!CALL_FIELDS.has(key) && typeof value === 'string') return value
+  }
+  return null
+}
+
 // 小人畫圖片版要終端機開了圖片，但 mod 問不到終端機最後有沒有開：Claude Code 認不出 cmux，背景 session 也預設不開，
 // 使用者只在 cmux 裡設這個變數強制開啟，所以跟著它走。跟 Claude Code 的判斷一致，非空就算開；讀不到當成沒設
 async function readForcesTerminalImages($: EngineInterface): Promise<boolean> {
@@ -261,7 +352,11 @@ export const register: Register = on => {
   on('session.end', async ($, e, next) => {
     stopTimer()
     clearStatus($)
-    if (e.reason === 'clear') await update($, batchAtom, () => null).catch(() => {})
+    if (e.reason === 'clear') {
+      await update($, batchAtom, () => null).catch(() => {})
+      await update($, logsAtom, () => null).catch(() => {})
+      await update($, selectedAtom, () => null).catch(() => {})
+    }
     return next(e)
   })
 
@@ -287,6 +382,8 @@ export const register: Register = on => {
       await closePanel($)
       return { text: '已關閉子代理面板。' }
     }
+    // 每次打開面板都從清單開始
+    await showList($)
     // 使用者打指令開的窗格任何寬度都放得下，也讓之後 mod 自己開時門檻降到 110 欄
     await $.ui.open({ id: PANE_ID, title: PANE_TITLE, columns: PANE_COLUMNS })
     await syncTimerAndStatus($)
@@ -310,14 +407,29 @@ export const register: Register = on => {
   on('turn.step', async function* ($, e, next) {
     if (e.agentId !== undefined) await recordThinkingStart($, e.agentId)
     const result = yield* next(e)
-    if (e.agentId !== undefined) await recordStepUsage($, e.agentId, { model: e.model, effort: e.effort, usage: result.usage })
+    if (e.agentId !== undefined) {
+      await recordStepUsage($, e.agentId, { model: e.model, effort: e.effort, usage: result.usage })
+      // 沒有要求工具、正常結束的那一步是直接回覆的最後答案
+      const isFinal = result.toolUses.length === 0 && result.stopReason === 'end_turn'
+      if (result.answer.trim() !== '') await recordAnswer($, e.agentId, { text: result.answer, isFinal })
+    }
     return result
   })
 
   on('tool.call', async ($, e, next) => {
     if (e.agentId !== undefined) {
       await recordTool($, e.agentId, e)
-      return next(e)
+      // 交回報告：記成回報，不另外記成一筆工具。這個工具不在型別的內建工具清單裡，所以當成一般字串比較
+      const toolName: string = e.tool
+      if (toolName === HANDBACK_TOOL) {
+        const text = handbackText(e)
+        if (text !== null) await recordReport($, e.agentId, text)
+        return next(e)
+      }
+      const toolId = await recordToolStart($, e.agentId, e)
+      const result = await next(e)
+      if (toolId !== null) await recordToolEnd($, e.agentId, toolId, result)
+      return result
     }
     if (e.tool !== 'Agent') return next(e)
     const result = await next(e)
@@ -326,7 +438,10 @@ export const register: Register = on => {
   })
 
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId !== undefined) await recordFinish($, e.agentId, e.reason)
+    if (e.agentId !== undefined) {
+      await recordFinish($, e.agentId, e.reason)
+      await recordUnfinished($, e.agentId)
+    }
     return next(e)
   })
 
