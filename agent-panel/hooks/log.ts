@@ -29,11 +29,19 @@ export function finishTool(logs: Logs | null, agentId: string, toolId: string, e
   }))
 }
 
+// 一步的回覆文字；at 是這一步開始的時間。
 // 沒有要求工具的最後答案就是直接回覆的回報；已經用 SubagentHandback 交回過，就只是一則訊息
 export function addAnswer(logs: Logs | null, agentId: string, answer: { at: number; text: string; isFinal: boolean }): Logs {
-  const hasReport = agentLog(logs, agentId).entries.some(entry => entry.kind === 'report')
+  const entries = agentLog(logs, agentId).entries
+  const hasReport = entries.some(entry => entry.kind === 'report')
   if (answer.isFinal && !hasReport) return addReport(logs, agentId, { at: answer.at, text: answer.text })
-  return updateLog(logs, agentId, append({ kind: 'message', at: answer.at, text: clip(answer.text, MESSAGE_LIMIT) }))
+  const text = clip(answer.text, MESSAGE_LIMIT)
+  // 同一步已經交回的報告跟這段話相同（子代理常把報告原文先說一遍）就不重複記
+  const repeatsReport = entries.some(
+    entry => entry.kind === 'report' && entry.at >= answer.at && clip(entry.text, MESSAGE_LIMIT).trim() === text.trim(),
+  )
+  if (repeatsReport) return updateLog(logs, agentId, log => log)
+  return updateLog(logs, agentId, log => insertByTime(log, { kind: 'message', at: answer.at, text }))
 }
 
 // 子代理常在交回前把報告原文說一遍：前一則訊息跟回報（照訊息的上限截斷後）相同就拿掉，詳細頁才不會出現兩次
@@ -85,6 +93,13 @@ function updateLog(logs: Logs | null, agentId: string, change: (log: AgentLog) =
 
 function append(entry: LogEntry) {
   return (log: AgentLog): AgentLog => ({ ...log, entries: [...log.entries, entry] })
+}
+
+// 工具在回應串流時就開始執行，會比那一步的訊息先記下：訊息插在這一步開始之後才開始的紀錄前面
+function insertByTime(log: AgentLog, entry: LogEntry): AgentLog {
+  const index = log.entries.findIndex(existing => existing.at >= entry.at)
+  if (index < 0) return { ...log, entries: [...log.entries, entry] }
+  return { ...log, entries: [...log.entries.slice(0, index), entry, ...log.entries.slice(index)] }
 }
 
 function trimToLimit(log: AgentLog): AgentLog {

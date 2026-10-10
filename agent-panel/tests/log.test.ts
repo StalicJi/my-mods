@@ -76,3 +76,16 @@ test('agentLog：沒有紀錄的子代理回空的', () => {
   expect(agentLog(null, target)).toEqual({ entries: [], dropped: 0 })
   expect(agentLog(addToolStart(null, target, tool('r1')), 'a2')).toEqual({ entries: [], dropped: 0 })
 })
+
+test('addAnswer：訊息插在這一步開始之後才開始的紀錄前面（工具可能在回應串流時就先執行）', () => {
+  let logs = addToolStart(null, target, tool('r1', 5))
+  logs = addToolStart(logs, target, tool('r2', 12))
+  logs = addAnswer(logs, target, { at: 10, text: '接著讀 r2', isFinal: false })
+  expect(agentLog(logs, target).entries.map((entry: any) => entry.id ?? entry.text)).toEqual(['r1', '接著讀 r2', 'r2'])
+})
+
+test('addAnswer：同一步已經交回的報告跟這段話相同時不重複記', () => {
+  let logs = addReport(null, target, { at: 12, text: '報告全文' })
+  logs = addAnswer(logs, target, { at: 10, text: '報告全文', isFinal: false })
+  expect(agentLog(logs, target).entries.map((entry: any) => entry.kind)).toEqual(['report'])
+})

@@ -285,10 +285,10 @@ async function recordReport($: EngineInterface, agentId: string, text: string) {
   }
 }
 
-async function recordAnswer($: EngineInterface, agentId: string, answer: { text: string; isFinal: boolean }) {
+// answer.at 是這一步開始的時間：工具可能在回應串流時就先執行，訊息要排在它們前面
+async function recordAnswer($: EngineInterface, agentId: string, answer: { at: number; text: string; isFinal: boolean }) {
   try {
-    const at = await $.clock.now()
-    await updateLog($, agentId, logs => addAnswer(logs, agentId, { at, ...answer }))
+    await updateLog($, agentId, logs => addAnswer(logs, agentId, answer))
   } catch {
     // 略過
   }
@@ -422,13 +422,14 @@ export const register: Register = on => {
   })
 
   on('turn.step', async function* ($, e, next) {
+    const stepStartedAt = e.agentId !== undefined ? await $.clock.now().catch(() => 0) : 0
     if (e.agentId !== undefined) await recordThinkingStart($, e.agentId)
     const result = yield* next(e)
     if (e.agentId !== undefined) {
       await recordStepUsage($, e.agentId, { model: e.model, effort: e.effort, usage: result.usage })
       // 沒有要求工具、正常結束的那一步是直接回覆的最後答案
       const isFinal = result.toolUses.length === 0 && result.stopReason === 'end_turn'
-      if (result.answer.trim() !== '') await recordAnswer($, e.agentId, { text: result.answer, isFinal })
+      if (result.answer.trim() !== '') await recordAnswer($, e.agentId, { at: stepStartedAt, text: result.answer, isFinal })
     }
     return result
   })

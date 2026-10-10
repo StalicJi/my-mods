@@ -23,7 +23,8 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
     // tool.call（Agent 以外）依序回的結果，排完了回成功
     toolReplies: [] as object[],
     // 每次請求依序回的 answer、toolUses、stopReason，沒排就是只呼叫工具的空回覆
-    stepReplies: [] as { answer?: string; toolUses?: object[]; stopReason?: string }[],
+    // waitFor：請求停在串流中，等測試放行才結束（模擬 Claude Code 在 tool_use 一到就先執行工具）
+    stepReplies: [] as { answer?: string; toolUses?: object[]; stopReason?: string; waitFor?: Promise<void> }[],
     // $.ui.scroll 收到的參數
     scrolls: [] as unknown[],
   }
@@ -42,6 +43,7 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
   on('turn.step', async function* (_$: any, e: any) {
     if (e.agentId !== undefined) control.batchAtStep = control.state.get('batch')
     const reply = control.stepReplies.shift() ?? {}
+    if (reply.waitFor !== undefined) await reply.waitFor
     return {
       turnId: e.turnId, index: e.index, answer: reply.answer ?? '', toolUses: reply.toolUses ?? [],
       stopReason: reply.stopReason ?? 'end_turn', usage: { ...USAGE, model: e.model },
@@ -554,4 +556,21 @@ test('新回合派出子代理時，被帶過去的執行中子代理紀錄還�
   expect(byAgent.a1.entries.map((entry: any) => entry.id)).toEqual(['r1', 'r4'])
   expect(byAgent.a3.entries.map((entry: any) => entry.id)).toEqual(['r3'])
   expect(byAgent.a2).toBeUndefined()
+})
+
+test('工具在回應串流時就先執行：那一步的訊息排在它前面，時間是那一步開始的時間', async ($, on) => {
+  const control = engine(on)
+  let release = () => {}
+  const waitFor = new Promise<void>(resolve => (release = resolve))
+  control.stepReplies.push({ answer: '接著讀設定檔', toolUses: [{ name: 'Read', input: {} }], stopReason: 'tool_use', waitFor })
+  await start($)
+  await spawnAgent($)
+  await control.clock.advance(1000)
+  const pending = step($, 'a1')
+  await control.clock.advance(2000)
+  await $.tool.call({ tool: 'Read', file_path: '/w/c.ts', agentId: 'a1', tool_use_id: 'r1' } as any)
+  release()
+  await pending
+  const entries = control.state.get('logs').byAgent.a1.entries
+  expect(entries.map((entry: any) => [entry.kind, entry.at])).toEqual([['message', 1000], ['tool', 3000]])
 })
