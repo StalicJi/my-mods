@@ -73,6 +73,8 @@ let toolSequence = 0
 
 type SpawnFacts = { id: string; description: string; agentType: string; agentName: string | null; isNested: boolean }
 type FinishReason = 'answer' | 'aborted' | 'error' | 'refusal'
+// 一次工具呼叫的摘要與開始時間：卡片和詳細頁的紀錄共用同一份
+type ToolStart = { summary: string; at: number }
 
 // mod 自己開的窗格要終端機夠寬才放得下（使用者親手開過後門檻較低）；放不下時窗格在背景等，提示一次怎麼開
 export async function openPanel($: EngineInterface): Promise<void> {
@@ -218,17 +220,19 @@ async function recordStepUsage($: EngineInterface, agentId: string, step: { mode
   }
 }
 
-async function recordTool($: EngineInterface, agentId: string, call: ToolCallInput) {
+// 卡片顯示子代理目前在做什麼。回傳這次的摘要與時間，詳細頁的紀錄直接沿用，不再讀一次批次、算一次摘要；
+// 不在這一批（Claude Code 的內部 fork）或記錄失敗時回傳 null，詳細頁也不記
+async function recordTool($: EngineInterface, agentId: string, call: ToolCallInput): Promise<ToolStart | null> {
   try {
-    if (!(await isInBatch($, agentId))) return
-    const activity = describeTool(call.tool, call)
-    const at = await $.clock.now()
-    await update($, batchAtom, batch => (batch === null ? batch : recordToolCall(batch, agentId, activity, at)))
+    if (!(await isInBatch($, agentId))) return null
+    const start: ToolStart = { summary: describeTool(call.tool, call), at: await $.clock.now() }
+    await update($, batchAtom, batch => (batch === null ? batch : recordToolCall(batch, agentId, start.summary, start.at)))
     // 面板可能先在背景等待、終端機拉寬後才放上畫面，或被使用者按 ✕ 關掉，這些都沒有事件通知；
     // 趁工具呼叫補啟動動畫，或補上輸入框下方的狀態列
     if (timer === undefined) await syncTimerAndStatus($)
+    return start
   } catch {
-    // 略過
+    return null
   }
 }
 
@@ -263,13 +267,14 @@ async function updateLog($: EngineInterface, agentId: string, change: (logs: Log
   await update($, logsAtom, change)
 }
 
+// 下面三個只在 recordTool 確認過子代理在這一批之後呼叫，所以不再讀批次。
+// 執行中的子代理換批次時會被帶到新的一批，紀錄不會在工具跑到一半時被刪掉
+
 // 工具開始時加一筆執行中的紀錄；回傳紀錄 id，結果回來時用它找回同一筆
-async function recordToolStart($: EngineInterface, agentId: string, call: ToolCallInput): Promise<string | null> {
+async function recordToolStart($: EngineInterface, agentId: string, call: ToolCallInput, start: ToolStart): Promise<string | null> {
   try {
-    if (!(await isInBatch($, agentId))) return null
     const id = call.tool_use_id ?? `${agentId}-${++toolSequence}`
-    const at = await $.clock.now()
-    await updateLog($, agentId, logs => addToolStart(logs, agentId, { id, at, summary: describeTool(call.tool, call) }))
+    await update($, logsAtom, logs => addToolStart(logs, agentId, { id, ...start }))
     return id
   } catch {
     return null
@@ -278,16 +283,15 @@ async function recordToolStart($: EngineInterface, agentId: string, call: ToolCa
 
 async function recordToolEnd($: EngineInterface, agentId: string, toolId: string, result: unknown) {
   try {
-    await updateLog($, agentId, logs => finishTool(logs, agentId, toolId, toolEndOf(result)))
+    await update($, logsAtom, logs => finishTool(logs, agentId, toolId, toolEndOf(result)))
   } catch {
     // 略過
   }
 }
 
-async function recordReport($: EngineInterface, agentId: string, text: string) {
+async function recordReport($: EngineInterface, agentId: string, report: { at: number; text: string }) {
   try {
-    const at = await $.clock.now()
-    await updateLog($, agentId, logs => addReport(logs, agentId, { at, text }))
+    await update($, logsAtom, logs => addReport(logs, agentId, report))
   } catch {
     // 略過
   }
@@ -477,15 +481,15 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     if (e.agentId !== undefined) {
-      await recordTool($, e.agentId, e)
+      const start = await recordTool($, e.agentId, e)
       // 交回報告：記成回報，不另外記成一筆工具。這個工具不在型別的內建工具清單裡，所以當成一般字串比較
       const toolName: string = e.tool
       if (toolName === HANDBACK_TOOL) {
         const text = handbackText(e)
-        if (text !== null) await recordReport($, e.agentId, text)
+        if (start !== null && text !== null) await recordReport($, e.agentId, { at: start.at, text })
         return next(e)
       }
-      const toolId = await recordToolStart($, e.agentId, e)
+      const toolId = start === null ? null : await recordToolStart($, e.agentId, e, start)
       let result: Awaited<ReturnType<typeof next>>
       try {
         result = await next(e)

@@ -683,3 +683,28 @@ test('工具執行時拋例外：紀錄改成出錯並留例外訊息第一行�
   expect(typeof entry.errorLine).toBe('string')
   expect(entry.errorLine.length).toBeGreaterThan(0)
 })
+
+test('子代理的一次工具呼叫只讀 2 次批次（確認在這一批、寫入卡片），卡片與紀錄用同一份摘要與時間', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  await control.clock.advance(3000)
+  const before = control.state.reads('batch')
+  await $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'r1' } as any)
+  expect(control.state.reads('batch') - before).toBe(2)
+  const row = control.state.get('batch').agents[0]
+  const entry = control.state.get('logs').byAgent.a1.entries[0]
+  expect(entry).toMatchObject({ summary: row.activity, at: row.activityStartedAt, outcome: 'ok' })
+})
+
+test('子代理交回報告時也只讀 2 次批次，回報時間跟卡片的工具開始時間相同', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  await control.clock.advance(3000)
+  const before = control.state.reads('batch')
+  await $.tool.call({ tool: 'SubagentHandback', message: '報告內容', agentId: 'a1' } as any)
+  expect(control.state.reads('batch') - before).toBe(2)
+  const row = control.state.get('batch').agents[0]
+  expect(control.state.get('logs').byAgent.a1.entries).toEqual([{ kind: 'report', at: row.activityStartedAt, text: '報告內容' }])
+})
