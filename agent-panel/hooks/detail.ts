@@ -3,6 +3,7 @@
 import type { AgentLog, LogEntry, ToolOutcome } from '../types'
 import { displayWidth, fitToWidth, formatElapsed } from './layout'
 import type { Span } from './layout'
+import { MAX_ENTRIES } from './log'
 
 export const BACK_LABEL = '← 返回'
 
@@ -22,8 +23,10 @@ const TOOL_ICONS: Record<ToolOutcome, { icon: string; color?: string }> = {
   running: { icon: '…' },
   unfinished: { icon: '·' },
 }
-// 子代理執行中面板每 0.2 秒重畫一次，回報最長幾百列：換行結果依（寬度、文字）快取，不每次重算
-const WRAP_CACHE_LIMIT = 50
+// 子代理執行中面板每 0.2 秒重畫一次，回報最長幾百列：換行結果依（寬度、文字）快取，不每次重算。
+// 一頁最多 MAX_ENTRIES 筆訊息或回報要換行，上限放得下一整頁；滿了丟最久沒用到的那筆（LRU），
+// 紀錄滾動時只有新的那筆要算，不會整個清空重算
+const WRAP_CACHE_LIMIT = MAX_ENTRIES
 const wrapCache = new Map<string, string[]>()
 
 export function formatOffset(ms: number): string {
@@ -118,11 +121,19 @@ function padTime(time: string, timeWidth: number) {
   return time + ' '.repeat(Math.max(0, timeWidth - displayWidth(time)))
 }
 
-function wrapCached(text: string, width: number): string[] {
+// 回傳的陣列跟快取共用，呼叫端不能改它。Map 依加入順序排：用到就移到最後，最前面就是最久沒用到的
+export function wrapCached(text: string, width: number): string[] {
   const key = `${width}|${text}`
   const cached = wrapCache.get(key)
-  if (cached !== undefined) return cached
-  if (wrapCache.size >= WRAP_CACHE_LIMIT) wrapCache.clear()
+  if (cached !== undefined) {
+    wrapCache.delete(key)
+    wrapCache.set(key, cached)
+    return cached
+  }
+  if (wrapCache.size >= WRAP_CACHE_LIMIT) {
+    const oldest = wrapCache.keys().next()
+    if (oldest.done !== true) wrapCache.delete(oldest.value)
+  }
   const lines = wrapToWidth(text, width)
   wrapCache.set(key, lines)
   return lines

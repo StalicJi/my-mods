@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
-import { detailLayout, detailRows, formatOffset, wrapToWidth } from '../hooks/detail'
+import { detailLayout, detailRows, formatOffset, wrapCached, wrapToWidth } from '../hooks/detail'
+import { MAX_ENTRIES } from '../hooks/log'
 import { displayWidth } from '../hooks/layout'
 import type { Span } from '../hooks/layout'
 import type { LogEntry } from '../types'
@@ -126,4 +127,16 @@ test('wrapToWidth：英數字詞不在中間切開，放不下就整個換到下
 test('wrapToWidth：比一列還長的詞才硬切；段落本身開頭的縮排保留', () => {
   expect(wrapToWidth('a'.repeat(25), 10)).toEqual(['a'.repeat(10), 'a'.repeat(10), 'a'.repeat(5)])
   expect(wrapToWidth('  - 項目', 20)).toEqual(['  - 項目'])
+})
+
+test('換行快取放得下一整頁：紀錄滾動（丟掉最舊一筆、加一筆新的）時，其他筆都用快取，只算新的那一筆', () => {
+  const wrapPage = (start: number) => Array.from({ length: MAX_ENTRIES }, (_, offset) => wrapCached(`第 ${start + offset} 則快取訊息`, 30))
+  let previous = wrapPage(0)
+  // 滾動超過兩頁：滿了就整個清空的快取，就算上限放大也會在某一次重畫時全部重算
+  for (let start = 1; start <= 2 * MAX_ENTRIES; start++) {
+    const current = wrapPage(start)
+    // 命中快取時回傳同一個陣列
+    current.slice(0, -1).forEach((lines, index) => expect(lines).toBe(previous[index + 1]))
+    previous = current
+  }
 })
