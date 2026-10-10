@@ -395,6 +395,8 @@ export const register: Register = on => {
     await $.command
       .register({ name: 'agents', description: '開關子代理面板；/agents focus 把鍵盤交給面板', argumentHint: '[focus]', immediate: true })
       .catch(() => {})
+    // 快捷鍵的 command: 綁定不能帶參數，所以另外給一個不帶參數的版本，例如 keybindings.json 的 "ctrl+x a": "command:agents-focus"
+    await $.command.register({ name: 'agents-focus', description: '把鍵盤交給子代理面板（同 /agents focus）', immediate: true }).catch(() => {})
     await seedFromAgentList($)
     await syncTimerAndStatus($) // 熱重載時把動畫與狀態列接回來
     return started
@@ -426,6 +428,8 @@ export const register: Register = on => {
     }
     return next(e)
   })
+
+  on('command.run', { command: 'agents-focus' }, async $ => focusPanel($))
 
   on('command.run', { command: 'agents' }, async ($, e) => {
     const action = e.args.trim().toLowerCase()

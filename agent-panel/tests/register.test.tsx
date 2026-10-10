@@ -639,3 +639,27 @@ test('/agents 不帶參數打開時不要求焦點；其他參數只回用法、
   expect(control.opens).toHaveLength(opens)
   expect(control.closes).toHaveLength(1)
 })
+
+test('/agents-focus 註冊成立即執行、不帶參數，讓快捷鍵可以用 command:agents-focus 綁定', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  const spec = control.registered.find((registered: any) => registered.name === 'agents-focus')
+  expect(spec).toMatchObject({ immediate: true })
+  expect(spec.argumentHint).toBeUndefined()
+})
+
+test('/agents-focus 跟 /agents focus 一樣：面板關著時從清單開始打開並要求焦點，開著時只要求焦點', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  await $.command.run({ command: 'agents', args: '' } as any) // 開著 → 關
+  control.state.set('selected', 'a1')
+  const reply = await $.command.run({ command: 'agents-focus', args: '' } as any)
+  expect(control.opens.at(-1)).toMatchObject({ id: 'agent-panel', focus: true })
+  expect(control.state.get('selected')).toBeNull()
+  expect(reply.text).toBe(FOCUS_REPLY)
+  control.state.set('selected', 'a1')
+  await $.command.run({ command: 'agents-focus', args: '' } as any)
+  expect(control.closes).toHaveLength(1)
+  expect(control.state.get('selected')).toBe('a1')
+})
