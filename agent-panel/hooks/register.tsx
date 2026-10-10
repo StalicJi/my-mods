@@ -34,6 +34,9 @@ const PANE_TITLE = 'Agents'
 // 停靠在右邊時要求的寬度；放在輸入框上方時 Claude Code 會忽略它
 const PANE_COLUMNS = 42
 const NARROW_HINT = '子代理面板放不下：打 /agents 開啟'
+const AGENTS_USAGE = '用法：/agents 開關子代理面板；/agents focus 把鍵盤交給面板。'
+// 焦點只是請求（輸入框有字、正在對話框裡就不給），$.ui.open 也不回報有沒有給，所以說「要求」
+const FOCUS_REPLY = '已要求把鍵盤交給子代理面板：Tab 移動、Enter 按下、Esc 回到輸入框。'
 const EMPTY_HINT = '這個 session 還沒有派出子代理'
 // 彗星移動與時間跳動：每 0.2 秒一拍
 const ANIMATION_MS = 200
@@ -308,6 +311,16 @@ async function recordUnfinished($: EngineInterface, agentId: string) {
   }
 }
 
+// /agents focus：ctrl+x tab 遇到輸入框上方有按鈕（例如 next-steps）時會先聚焦那一排，這裡直接把鍵盤交給面板。
+// 面板關著時跟 /agents 一樣從清單開始；開著時保留目前的畫面（例如詳細頁），只要求焦點
+async function focusPanel($: EngineInterface): Promise<{ text: string }> {
+  const panes = await $.ui.panes().catch(() => [])
+  if (!isPanePlaced(panes)) await showList($)
+  await $.ui.open({ id: PANE_ID, title: PANE_TITLE, columns: PANE_COLUMNS, focus: true })
+  await syncTimerAndStatus($)
+  return { text: FOCUS_REPLY }
+}
+
 // 回到清單。update 就算拿回同一個值也會寫一次、讓面板重畫，所以已經是清單就不寫
 export async function showList($: EngineInterface): Promise<void> {
   try {
@@ -378,7 +391,10 @@ export const register: Register = on => {
     const started = await next(e)
     forcesTerminalImages = await readForcesTerminalImages($)
     // 名稱已被佔用時會被拒絕，不影響其他功能
-    await $.command.register({ name: 'agents', description: '開關子代理面板' }).catch(() => {})
+    // immediate：主代理還在工作時打 /agents 也立刻執行，不用等這一輪結束；處理時只開關窗格、讀 state，不依賴這一輪的狀態
+    await $.command
+      .register({ name: 'agents', description: '開關子代理面板；/agents focus 把鍵盤交給面板', argumentHint: '[focus]', immediate: true })
+      .catch(() => {})
     await seedFromAgentList($)
     await syncTimerAndStatus($) // 熱重載時把動畫與狀態列接回來
     return started
@@ -411,7 +427,10 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: 'agents' }, async $ => {
+  on('command.run', { command: 'agents' }, async ($, e) => {
+    const action = e.args.trim().toLowerCase()
+    if (action === 'focus') return focusPanel($)
+    if (action !== '') return { text: AGENTS_USAGE }
     const panes = await $.ui.panes().catch(() => [])
     if (isPanePlaced(panes)) {
       await closePanel($)

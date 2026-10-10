@@ -28,6 +28,8 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
     stepReplies: [] as { answer?: string; toolUses?: object[]; stopReason?: string; waitFor?: Promise<void> }[],
     // $.ui.scroll 收到的參數
     scrolls: [] as unknown[],
+    // $.command.register 收到的參數
+    registered: [] as any[],
   }
   on('prompt.submit', () => ({ text: '' }))
   on('session.end', () => ({ sessionId: 's' }))
@@ -59,7 +61,10 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
     control.scrolls.push(e)
     return { value: {} }
   })
-  on('command.register', () => ({ value: undefined }))
+  on('command.register', (_$: any, e: any) => {
+    control.registered.push(e)
+    return { value: undefined }
+  })
   on('ui.open', (_$: any, e: any) => {
     control.opens.push(e)
     control.panes = [...control.panes.filter(pane => pane.id !== e.id), { id: e.id, title: e.title, isShown: true, isFocused: false, isPlaced: control.isPlaced }]
@@ -587,4 +592,50 @@ test('scrollToNewest 把最新一筆捲到面板頂端；被拒絕或拋錯時�
   const always: unknown[] = []
   await scrollToNewest({ scroll: async args => (always.push(args), { deny: '一直不行' }), sleep: async () => {} })
   expect(always).toHaveLength(5)
+})
+
+const FOCUS_REPLY = '已要求把鍵盤交給子代理面板：Tab 移動、Enter 按下、Esc 回到輸入框。'
+
+test('/agents 註冊成立即執行（輪到一半也能用），參數提示是 [focus]', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  expect(control.registered.find((spec: any) => spec.name === 'agents')).toMatchObject({ argumentHint: '[focus]', immediate: true })
+})
+
+test('/agents focus：面板關著時打開並要求鍵盤焦點，從清單開始', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  await $.command.run({ command: 'agents', args: '' } as any) // 開著 → 關
+  control.state.set('selected', 'a1')
+  const reply = await $.command.run({ command: 'agents', args: 'focus' } as any)
+  expect(control.opens.at(-1)).toMatchObject({ id: 'agent-panel', title: 'Agents', columns: 42, focus: true })
+  expect(control.state.get('selected')).toBeNull()
+  expect(reply.text).toBe(FOCUS_REPLY)
+})
+
+test('/agents focus：面板開著時不關、不回清單，只要求鍵盤焦點；大小寫與空白不影響', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  control.state.set('selected', 'a1')
+  const reply = await $.command.run({ command: 'agents', args: '  Focus ' } as any)
+  expect(control.closes).toHaveLength(0)
+  expect(control.opens.at(-1)).toMatchObject({ id: 'agent-panel', focus: true })
+  expect(control.state.get('selected')).toBe('a1')
+  expect(reply.text).toBe(FOCUS_REPLY)
+})
+
+test('/agents 不帶參數打開時不要求焦點；其他參數只回用法、不動面板', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  await $.command.run({ command: 'agents', args: '' } as any) // 開著 → 關
+  await $.command.run({ command: 'agents', args: '' } as any) // 關著 → 開
+  expect(control.opens.at(-1).focus).toBeUndefined()
+  const opens = control.opens.length
+  const reply = await $.command.run({ command: 'agents', args: 'xyz' } as any)
+  expect(reply.text).toBe('用法：/agents 開關子代理面板；/agents focus 把鍵盤交給面板。')
+  expect(control.opens).toHaveLength(opens)
+  expect(control.closes).toHaveLength(1)
 })
