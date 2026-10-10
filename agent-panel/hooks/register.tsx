@@ -6,8 +6,7 @@ import type { EngineInterface, Register, Timer, ToolCallInput } from 'claude-cod
 import type { AgentRow, Batch, Logs, TokenUsage } from '../types'
 import { addAgent, finishAgent, hasRunning, recordReported, recordStep, recordThinking, recordToolCall, seedRunning } from './batch'
 import { BACK_LABEL, detailRows } from './detail'
-import { addAnswer, addReport, addToolStart, agentLog, finishTool, markUnfinished, toolEndOf } from './log'
-import type { LogTarget } from './log'
+import { addAnswer, addReport, addToolStart, agentLog, finishTool, forgetAgents, markUnfinished, toolEndOf } from './log'
 import {
   MASCOT_GAP,
   agentCard,
@@ -171,11 +170,19 @@ async function recordSpawn($: EngineInterface, spawn: SpawnFacts) {
     // 開了新的一批才跳出面板；同一批再派不重開，使用者手動關掉後也不會一直彈回來。
     // 在更新函式裡判斷：平行派出時 update 會在版本衝突後重試，最後一次看到的才是真正寫入當下的批次
     let isNewBatch = false
+    // 換批次時沒被帶過去（已結束）的子代理；它們的詳細頁紀錄跟著刪掉，被帶過去的保留
+    let leftBehind: string[] = []
     await update($, batchAtom, batch => {
       const next = addAgent(batch, currentTurnId, { ...spawn, startedAt })
       isNewBatch = batch === null || batch.turnId !== next.turnId
+      const kept = new Set(next.agents.map(agent => agent.id))
+      leftBehind = isNewBatch && batch !== null ? batch.agents.filter(agent => !kept.has(agent.id)).map(agent => agent.id) : []
       return next
     })
+    if (leftBehind.length > 0) {
+      const forgotten = leftBehind
+      await update($, logsAtom, logs => forgetAgents(logs, forgotten)).catch(() => {})
+    }
     if (isNewBatch) await openPanel($)
     else await syncTimerAndStatus($)
   } catch {
@@ -242,12 +249,10 @@ async function recordFinish($: EngineInterface, agentId: string, reason: FinishR
   }
 }
 
-// 詳細頁的紀錄：用這一批的 turnId 寫入；不在這一批的 agentId（例如 Claude Code 的內部 fork）不寫
-async function updateLog($: EngineInterface, agentId: string, change: (logs: Logs | null, target: LogTarget) => Logs) {
-  const batch = await read($, batchAtom)
-  if (batch === null || !batch.agents.some(agent => agent.id === agentId)) return
-  const target = { turnId: batch.turnId, agentId }
-  await update($, logsAtom, logs => change(logs, target))
+// 詳細頁的紀錄：只記這一批裡的子代理（Claude Code 的內部 fork 也帶 agentId，但不在這一批）
+async function updateLog($: EngineInterface, agentId: string, change: (logs: Logs | null) => Logs) {
+  if (!(await isInBatch($, agentId))) return
+  await update($, logsAtom, change)
 }
 
 // 工具開始時加一筆執行中的紀錄；回傳紀錄 id，結果回來時用它找回同一筆
@@ -256,7 +261,7 @@ async function recordToolStart($: EngineInterface, agentId: string, call: ToolCa
     if (!(await isInBatch($, agentId))) return null
     const id = call.tool_use_id ?? `${agentId}-${++toolSequence}`
     const at = await $.clock.now()
-    await updateLog($, agentId, (logs, target) => addToolStart(logs, target, { id, at, summary: describeTool(call.tool, call) }))
+    await updateLog($, agentId, logs => addToolStart(logs, agentId, { id, at, summary: describeTool(call.tool, call) }))
     return id
   } catch {
     return null
@@ -265,7 +270,7 @@ async function recordToolStart($: EngineInterface, agentId: string, call: ToolCa
 
 async function recordToolEnd($: EngineInterface, agentId: string, toolId: string, result: unknown) {
   try {
-    await updateLog($, agentId, (logs, target) => finishTool(logs, target, toolId, toolEndOf(result)))
+    await updateLog($, agentId, logs => finishTool(logs, agentId, toolId, toolEndOf(result)))
   } catch {
     // 略過
   }
@@ -274,7 +279,7 @@ async function recordToolEnd($: EngineInterface, agentId: string, toolId: string
 async function recordReport($: EngineInterface, agentId: string, text: string) {
   try {
     const at = await $.clock.now()
-    await updateLog($, agentId, (logs, target) => addReport(logs, target, { at, text }))
+    await updateLog($, agentId, logs => addReport(logs, agentId, { at, text }))
   } catch {
     // 略過
   }
@@ -283,7 +288,7 @@ async function recordReport($: EngineInterface, agentId: string, text: string) {
 async function recordAnswer($: EngineInterface, agentId: string, answer: { text: string; isFinal: boolean }) {
   try {
     const at = await $.clock.now()
-    await updateLog($, agentId, (logs, target) => addAnswer(logs, target, { at, ...answer }))
+    await updateLog($, agentId, logs => addAnswer(logs, agentId, { at, ...answer }))
   } catch {
     // 略過
   }
@@ -292,7 +297,7 @@ async function recordAnswer($: EngineInterface, agentId: string, answer: { text:
 // 子代理結束時結果還沒回來的工具（中斷、失敗、熱重載）不會再更新，標成未完成
 async function recordUnfinished($: EngineInterface, agentId: string) {
   try {
-    await updateLog($, agentId, (logs, target) => markUnfinished(logs, target))
+    await updateLog($, agentId, logs => markUnfinished(logs, agentId))
   } catch {
     // 略過
   }
@@ -541,7 +546,7 @@ export const register: Register = on => {
       // 詳細頁：返回列（右邊淡色的整批狀態）、那個子代理的卡片、分隔線、紀錄。只有這裡讀 logs，清單不會因新增紀錄重畫
       if (selectedAgent !== undefined) {
         const logs = await read($, logsAtom)
-        const log = agentLog(logs, { turnId: batch.turnId, agentId: selectedAgent.id })
+        const log = agentLog(logs, selectedAgent.id)
         const header = statusLine(batch, now, columns - displayWidth(BACK_LABEL) - 1).map(span => ({ ...span, isDim: true }))
         return (
           <Box flexDirection="column">

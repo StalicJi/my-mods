@@ -451,7 +451,6 @@ test('子代理的工具呼叫記成紀錄，結果回來改成 ok、error、den
   await $.tool.call({ tool: 'Read', file_path: '/w/x.ts', agentId: 'a1', tool_use_id: 'r2' } as any)
   await $.tool.call({ tool: 'Bash', command: 'rm -rf /', agentId: 'a1', tool_use_id: 'r3' } as any)
   const logs = control.state.get('logs')
-  expect(logs.turnId).toBe('t1')
   expect(logs.byAgent.a1.entries).toEqual([
     { kind: 'tool', id: 'r1', at: 4000, summary: '讀取 src/app.ts', outcome: 'ok', errorLine: null },
     { kind: 'tool', id: 'r2', at: 4000, summary: '讀取 w/x.ts', outcome: 'error', errorLine: 'File does not exist.' },
@@ -515,7 +514,7 @@ test('子代理結束時還在 running 的工具改成 unfinished', async ($, on
   const control = engine(on)
   await start($)
   await spawnAgent($)
-  control.state.set('logs', { turnId: 't1', byAgent: { a1: { entries: [{ kind: 'tool', id: 'r1', at: 0, summary: '讀取 a', outcome: 'running', errorLine: null }], dropped: 0 } } })
+  control.state.set('logs', { byAgent: { a1: { entries: [{ kind: 'tool', id: 'r1', at: 0, summary: '讀取 a', outcome: 'running', errorLine: null }], dropped: 0 } } })
   await $.turn.complete({ reason: 'aborted', answer: '', durationMs: 1, agentId: 'a1', turnId: 'x' } as any)
   expect(control.state.get('logs').byAgent.a1.entries[0].outcome).toBe('unfinished')
 })
@@ -537,4 +536,22 @@ test('新的一批與 /agents 打開時 selected 清空；/clear 清空 logs 與
   await $.session.end({ reason: 'clear' } as any)
   expect(control.state.get('logs')).toBeNull()
   expect(control.state.get('selected')).toBeNull()
+})
+
+test('新回合派出子代理時，被帶過去的執行中子代理紀錄還在；已結束、沒被帶過去的刪掉', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  await spawnAgent($)
+  await $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'r1' } as any)
+  await $.tool.call({ tool: 'Read', file_path: '/w/b.ts', agentId: 'a2', tool_use_id: 'r2' } as any)
+  await $.turn.complete({ reason: 'answer', answer: '好了', durationMs: 1, agentId: 'a2', turnId: 'y' } as any)
+  await $.turn.start({ text: '再派一個', turnId: 't2' })
+  await spawnAgent($)
+  await $.tool.call({ tool: 'Read', file_path: '/w/c.ts', agentId: 'a3', tool_use_id: 'r3' } as any)
+  await $.tool.call({ tool: 'Read', file_path: '/w/d.ts', agentId: 'a1', tool_use_id: 'r4' } as any)
+  const byAgent = control.state.get('logs').byAgent
+  expect(byAgent.a1.entries.map((entry: any) => entry.id)).toEqual(['r1', 'r4'])
+  expect(byAgent.a3.entries.map((entry: any) => entry.id)).toEqual(['r3'])
+  expect(byAgent.a2).toBeUndefined()
 })

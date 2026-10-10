@@ -572,7 +572,7 @@ test('停靠時卡片標題列與精簡列是 plain 按鈕；放在輸入框上�
 // 測試的 state 是替身，寫入不會讓畫面自己重畫（host 才會），所以按下之後手動 redraw。
 // 點開時捲到最底下：測試套件在按鈕的處理函式裡沒有實作 ui.scroll，改在 cmux 實機驗證
 test('按標題切到詳細頁：返回列、卡片、分隔線、紀錄依序出現；詳細頁的卡片標題不是按鈕', async ($, on) => {
-  const { store } = setup(on, [row('a', { startedAt: 0 })], { logs: { turnId: 't1', byAgent: { a: { entries: [{ kind: 'tool', id: 'r1', at: 4000, summary: '讀取 config.ghostty', outcome: 'ok', errorLine: null }], dropped: 0 } } } })
+  const { store } = setup(on, [row('a', { startedAt: 0 })], { logs: { byAgent: { a: { entries: [{ kind: 'tool', id: 'r1', at: 4000, summary: '讀取 config.ghostty', outcome: 'ok', errorLine: null }], dropped: 0 } } } })
   const ui = await mount($)
   await ui.press({ key: 'open-a' })
   expect(store.get('selected')).toBe('a')

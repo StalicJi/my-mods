@@ -64,8 +64,8 @@ export type LogEntry =
 // dropped：超過上限時從最舊的丟掉了幾筆
 export type AgentLog = { entries: LogEntry[]; dropped: number }
 
-// turnId 跟 batch 的不同就是舊資料，下一次寫入直接換掉
-export type Logs = { turnId: string; byAgent: Record<string, AgentLog> }
+// 依 agentId 存；換批次時只刪掉沒被帶進新批次的子代理（跨回合的背景子代理保留紀錄）
+export type Logs = { byAgent: Record<string, AgentLog> }
 
 declare module 'claude-code' {
   interface PluginState {

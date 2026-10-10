@@ -1,16 +1,18 @@
 import { expect, test } from 'claude-code/testing'
 
-import { addAnswer, addReport, addToolStart, agentLog, finishTool, firstErrorLine, markUnfinished, toolEndOf } from '../hooks/log'
+import { addAnswer, addReport, addToolStart, agentLog, finishTool, firstErrorLine, forgetAgents, markUnfinished, toolEndOf } from '../hooks/log'
 import type { Logs } from '../types'
 
-const target = { turnId: 't1', agentId: 'a1' }
+const target = 'a1'
 const tool = (id: string, at = 0) => ({ id, at, summary: `讀取 ${id}` })
 
-test('turnId 不同的舊 logs 寫入時換成新的', () => {
-  const old = addToolStart(null, { turnId: 't0', agentId: 'a9' }, tool('x'))
-  const next = addToolStart(old, target, tool('r1'))
-  expect(next.turnId).toBe('t1')
-  expect(Object.keys(next.byAgent)).toEqual(['a1'])
+test('不同子代理的紀錄各自保留，forgetAgents 只刪掉指定的；沒有要刪的回傳原物件', () => {
+  let logs = addToolStart(null, 'a9', tool('x'))
+  logs = addToolStart(logs, target, tool('r1'))
+  expect(Object.keys(logs.byAgent).sort()).toEqual(['a1', 'a9'])
+  expect(Object.keys(forgetAgents(logs, ['a9'])!.byAgent)).toEqual(['a1'])
+  expect(forgetAgents(logs, ['nobody'])).toBe(logs)
+  expect(forgetAgents(null, ['a1'])).toBeNull()
 })
 
 test('工具開始是 running，finishTool 依 id 更新；找不到 id 不變', () => {
@@ -70,7 +72,7 @@ test('toolEndOf 與 firstErrorLine', () => {
   expect(firstErrorLine('x'.repeat(300))).toHaveLength(200)
 })
 
-test('agentLog：沒有紀錄或 turnId 不符時回空的', () => {
+test('agentLog：沒有紀錄的子代理回空的', () => {
   expect(agentLog(null, target)).toEqual({ entries: [], dropped: 0 })
-  expect(agentLog(addToolStart(null, target, tool('r1')), { turnId: 't2', agentId: 'a1' })).toEqual({ entries: [], dropped: 0 })
+  expect(agentLog(addToolStart(null, target, tool('r1')), 'a2')).toEqual({ entries: [], dropped: 0 })
 })
