@@ -173,6 +173,21 @@ async function isInBatch($: EngineInterface, agentId: string) {
   return batch !== null && batch.agents.some(agent => agent.id === agentId)
 }
 
+// 更新函式回傳原物件代表沒有變化：先用目前的值算一次，沒變就不寫，免得面板白白重畫；
+// 有變才交給 update，讀完到寫入之間被改過的話它會用最新的值重算。
+// atom 只能直接放在 read／update 的第一個參數（host 靠它掃出讀寫哪些 state），所以 logs 與 batch 各一個
+async function updateLogsIfChanged($: EngineInterface, change: (logs: Logs | null) => Logs | null) {
+  const current = await read($, logsAtom)
+  if (change(current) === current) return
+  await update($, logsAtom, change)
+}
+
+async function updateBatchIfChanged($: EngineInterface, change: (batch: Batch | null) => Batch | null) {
+  const current = await read($, batchAtom)
+  if (change(current) === current) return
+  await update($, batchAtom, change)
+}
+
 // 下面的記錄都只觀察：出錯就略過這次，不影響子代理本身
 async function recordSpawn($: EngineInterface, spawn: SpawnFacts) {
   try {
@@ -191,7 +206,7 @@ async function recordSpawn($: EngineInterface, spawn: SpawnFacts) {
     })
     if (leftBehind.length > 0) {
       const forgotten = leftBehind
-      await update($, logsAtom, logs => forgetAgents(logs, forgotten)).catch(() => {})
+      await updateLogsIfChanged($, logs => forgetAgents(logs, forgotten)).catch(() => {})
     }
     if (isNewBatch) await openPanel($)
     else await syncTimerAndStatus($)
@@ -243,8 +258,8 @@ async function recordAgentResult($: EngineInterface, record: unknown) {
   if (typeof reported.agentId !== 'string') return
   const agentId = reported.agentId
   try {
-    if (!(await isInBatch($, agentId))) return
-    await update($, batchAtom, batch => (batch === null ? batch : recordReported(batch, agentId, reported)))
+    // 不在這一批、或結果沒有總計（背景子代理）時 recordReported 回傳原物件，就不寫
+    await updateBatchIfChanged($, batch => (batch === null ? batch : recordReported(batch, agentId, reported)))
   } catch {
     // 略過
   }
@@ -261,10 +276,11 @@ async function recordFinish($: EngineInterface, agentId: string, reason: FinishR
   }
 }
 
-// 詳細頁的紀錄：只記這一批裡的子代理（Claude Code 的內部 fork 也帶 agentId，但不在這一批）
-async function updateLog($: EngineInterface, agentId: string, change: (logs: Logs | null) => Logs) {
+// 詳細頁的紀錄：只記這一批裡的子代理（Claude Code 的內部 fork 也帶 agentId，但不在這一批）。
+// 用在可能沒有變化的更新：子代理結束時常常沒有執行中的工具、最後的回覆常跟已交回的報告相同
+async function updateLog($: EngineInterface, agentId: string, change: (logs: Logs | null) => Logs | null) {
   if (!(await isInBatch($, agentId))) return
-  await update($, logsAtom, change)
+  await updateLogsIfChanged($, change)
 }
 
 // 下面三個只在 recordTool 確認過子代理在這一批之後呼叫，所以不再讀批次。
@@ -281,6 +297,7 @@ async function recordToolStart($: EngineInterface, agentId: string, call: ToolCa
   }
 }
 
+// 結果回來時那一筆幾乎一定還在（只有工具執行期間又多出 100 筆、或被 /clear 清掉才找不到），所以不先讀 logs 確認有沒有變
 async function recordToolEnd($: EngineInterface, agentId: string, toolId: string, result: unknown) {
   try {
     await update($, logsAtom, logs => finishTool(logs, agentId, toolId, toolEndOf(result)))
@@ -384,7 +401,8 @@ async function seedFromAgentList($: EngineInterface) {
   try {
     const listed = await $.agent.list()
     const now = await $.clock.now()
-    await update($, batchAtom, batch => seedRunning(batch, listed, now))
+    // 每次啟動（含熱重載）都會跑：大多沒有要補的，seedRunning 回傳原物件就不寫
+    await updateBatchIfChanged($, batch => seedRunning(batch, listed, now))
   } catch {
     // 略過
   }
@@ -410,9 +428,9 @@ export const register: Register = on => {
     stopTimer()
     clearStatus($)
     if (e.reason === 'clear') {
-      await update($, batchAtom, () => null).catch(() => {})
-      await update($, logsAtom, () => null).catch(() => {})
-      await update($, selectedAtom, () => null).catch(() => {})
+      await updateBatchIfChanged($, () => null).catch(() => {})
+      await updateLogsIfChanged($, () => null).catch(() => {})
+      await showList($)
     }
     return next(e)
   })

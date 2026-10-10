@@ -16,7 +16,7 @@ test('不同子代理的紀錄各自保留，forgetAgents 只刪掉指定的；�
 })
 
 test('工具開始是 running，finishTool 依 id 更新；找不到 id 不變', () => {
-  let logs = addToolStart(null, target, tool('r1', 4000))
+  let logs: Logs | null = addToolStart(null, target, tool('r1', 4000))
   expect(agentLog(logs, target).entries[0]).toEqual({ kind: 'tool', id: 'r1', at: 4000, summary: '讀取 r1', outcome: 'running', errorLine: null })
   logs = finishTool(logs, target, 'r1', { outcome: 'error', errorLine: 'File does not exist.' })
   expect(agentLog(logs, target).entries[0]).toMatchObject({ outcome: 'error', errorLine: 'File does not exist.' })
@@ -33,7 +33,7 @@ test('超過 100 筆從最舊的丟，dropped 累計', () => {
 })
 
 test('markUnfinished 只把 running 改成 unfinished', () => {
-  let logs = addToolStart(null, target, tool('r1'))
+  let logs: Logs | null = addToolStart(null, target, tool('r1'))
   logs = addToolStart(logs, target, tool('r2'))
   logs = finishTool(logs, target, 'r1', { outcome: 'ok', errorLine: null })
   const outcomes = agentLog(markUnfinished(logs, target), target).entries.map((entry: any) => entry.outcome)
@@ -88,4 +88,17 @@ test('addAnswer：同一步已經交回的報告跟這段話相同時不重複�
   let logs = addReport(null, target, { at: 12, text: '報告全文' })
   logs = addAnswer(logs, target, { at: 10, text: '報告全文', isFinal: false })
   expect(agentLog(logs, target).entries.map((entry: any) => entry.kind)).toEqual(['report'])
+})
+
+test('沒有變化時回傳原物件，也不替沒有紀錄的子代理建一份空的（register 據此不寫入）', () => {
+  let logs: Logs | null = addToolStart(null, target, tool('r1'))
+  logs = finishTool(logs, target, 'r1', { outcome: 'ok', errorLine: null })
+  // 沒有執行中的工具、找不到 id、沒有紀錄的子代理
+  expect(markUnfinished(logs, target)).toBe(logs)
+  expect(finishTool(logs, target, 'nope', { outcome: 'ok', errorLine: null })).toBe(logs)
+  expect(markUnfinished(logs, 'a9')).toBe(logs)
+  expect(markUnfinished(null, 'a9')).toBeNull()
+  // 同一步已經交回的報告跟這段話相同
+  const reported = addReport(logs, target, { at: 12, text: '報告全文' })
+  expect(addAnswer(reported, target, { at: 10, text: '報告全文', isFinal: false })).toBe(reported)
 })

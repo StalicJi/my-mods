@@ -1,4 +1,4 @@
-// 子代理詳細頁的紀錄：都是純函式、回傳新物件。
+// 子代理詳細頁的紀錄：都是純函式，有改到才回傳新物件；沒有改到時回傳原物件，register 據此不寫入（寫入一次詳細頁就重畫一次）。
 // 依 agentId 存，不看批次：換批次時由 forgetAgents 刪掉沒被帶過去的子代理，被帶過去的（跨回合的背景子代理）保留紀錄
 import type { AgentLog, LogEntry, Logs } from '../types'
 
@@ -22,11 +22,8 @@ export function addToolStart(logs: Logs | null, agentId: string, start: { id: st
   return updateLog(logs, agentId, append({ kind: 'tool', ...start, outcome: 'running', errorLine: null }))
 }
 
-export function finishTool(logs: Logs | null, agentId: string, toolId: string, end: ToolEnd): Logs {
-  return updateLog(logs, agentId, log => ({
-    ...log,
-    entries: log.entries.map(entry => (entry.kind === 'tool' && entry.id === toolId ? { ...entry, ...end } : entry)),
-  }))
+export function finishTool(logs: Logs | null, agentId: string, toolId: string, end: ToolEnd): Logs | null {
+  return editEntries(logs, agentId, entry => (entry.kind === 'tool' && entry.id === toolId ? { ...entry, ...end } : entry))
 }
 
 // 一步的回覆文字；at 是這一步開始的時間。
@@ -36,11 +33,11 @@ export function addAnswer(logs: Logs | null, agentId: string, answer: { at: numb
   const hasReport = entries.some(entry => entry.kind === 'report')
   if (answer.isFinal && !hasReport) return addReport(logs, agentId, { at: answer.at, text: answer.text })
   const text = clip(answer.text, MESSAGE_LIMIT)
-  // 同一步已經交回的報告跟這段話相同（子代理常把報告原文先說一遍）就不重複記
+  // 同一步已經交回的報告跟這段話相同（子代理常把報告原文先說一遍）就不重複記，回傳原物件
   const repeatsReport = entries.some(
     entry => entry.kind === 'report' && entry.at >= answer.at && clip(entry.text, MESSAGE_LIMIT).trim() === text.trim(),
   )
-  if (repeatsReport) return updateLog(logs, agentId, log => log)
+  if (logs !== null && repeatsReport) return logs
   return updateLog(logs, agentId, log => insertByTime(log, { kind: 'message', at: answer.at, text }))
 }
 
@@ -54,11 +51,8 @@ export function addReport(logs: Logs | null, agentId: string, report: { at: numb
   })
 }
 
-export function markUnfinished(logs: Logs | null, agentId: string): Logs {
-  return updateLog(logs, agentId, log => ({
-    ...log,
-    entries: log.entries.map(entry => (entry.kind === 'tool' && entry.outcome === 'running' ? { ...entry, outcome: 'unfinished' } : entry)),
-  }))
+export function markUnfinished(logs: Logs | null, agentId: string): Logs | null {
+  return editEntries(logs, agentId, entry => (entry.kind === 'tool' && entry.outcome === 'running' ? { ...entry, outcome: 'unfinished' } : entry))
 }
 
 // 換批次時刪掉沒被帶過去的子代理；沒有要刪的就回傳原物件，不多寫一次
@@ -89,6 +83,15 @@ export function firstErrorLine(text: string): string | null {
 function updateLog(logs: Logs | null, agentId: string, change: (log: AgentLog) => AgentLog): Logs {
   const next = trimToLimit(change(agentLog(logs, agentId)))
   return { byAgent: { ...logs?.byAgent, [agentId]: next } }
+}
+
+// 只改既有的紀錄、不增減筆數：一筆都沒改到就回傳原物件，也不替沒有紀錄的子代理建一份空的
+function editEntries(logs: Logs | null, agentId: string, edit: (entry: LogEntry) => LogEntry): Logs | null {
+  const log = logs?.byAgent[agentId]
+  if (logs === null || log === undefined) return logs
+  const entries = log.entries.map(edit)
+  if (entries.every((entry, index) => entry === log.entries[index])) return logs
+  return { byAgent: { ...logs.byAgent, [agentId]: { ...log, entries } } }
 }
 
 function append(entry: LogEntry) {

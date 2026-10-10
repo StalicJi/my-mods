@@ -23,6 +23,8 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
     clock: mock.clock(on),
     // tool.call（Agent 以外）依序回的結果，排完了回成功
     toolReplies: [] as object[],
+    // 主迴圈 Agent 工具回的結果：前景子代理帶 Claude Code 算的總計，背景子代理沒有
+    agentReply: { result: { agentId: 'a1', totalTokens: 26_000, totalToolUseCount: 12 }, text: '' } as object,
     // 每次請求依序回的 answer、toolUses、stopReason，沒排就是只呼叫工具的空回覆
     // waitFor：請求停在串流中，等測試放行才結束（模擬 Claude Code 在 tool_use 一到就先執行工具）
     stepReplies: [] as { answer?: string; toolUses?: object[]; stopReason?: string; waitFor?: Promise<void> }[],
@@ -52,11 +54,7 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
       stopReason: reply.stopReason ?? 'end_turn', usage: { ...USAGE, model: e.model },
     }
   })
-  on('tool.call', (_$: any, e: any) =>
-    e.tool === 'Agent'
-      ? { result: { agentId: 'a1', totalTokens: 26_000, totalToolUseCount: 12 }, text: '' }
-      : answerTool(control.toolReplies.shift()),
-  )
+  on('tool.call', (_$: any, e: any) => (e.tool === 'Agent' ? control.agentReply : answerTool(control.toolReplies.shift())))
   on('ui.scroll', (_$: any, e: any) => {
     control.scrolls.push(e)
     return { value: {} }
@@ -707,4 +705,67 @@ test('子代理交回報告時也只讀 2 次批次，回報時間跟卡片的�
   expect(control.state.reads('batch') - before).toBe(2)
   const row = control.state.get('batch').agents[0]
   expect(control.state.get('logs').byAgent.a1.entries).toEqual([{ kind: 'report', at: row.activityStartedAt, text: '報告內容' }])
+})
+
+test('子代理結束時沒有執行中的工具就不寫紀錄，也不替沒有紀錄的子代理建一份空的', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  await spawnAgent($)
+  await $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'r1' } as any)
+  const before = control.state.writes('logs')
+  await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1, agentId: 'a1', turnId: 'x' } as any)
+  await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1, agentId: 'a2', turnId: 'y' } as any)
+  expect(control.state.writes('logs') - before).toBe(0)
+  expect(Object.keys(control.state.get('logs').byAgent)).toEqual(['a1'])
+})
+
+test('最後的回覆跟已交回的報告相同時不寫紀錄', async ($, on) => {
+  const control = engine(on)
+  control.stepReplies.push({ answer: '報告內容', toolUses: [], stopReason: 'end_turn' })
+  await start($)
+  await spawnAgent($)
+  await $.tool.call({ tool: 'SubagentHandback', message: '報告內容', agentId: 'a1' } as any)
+  const before = control.state.writes('logs')
+  await step($, 'a1')
+  expect(control.state.writes('logs') - before).toBe(0)
+  expect(control.state.get('logs').byAgent.a1.entries.map((entry: any) => entry.kind)).toEqual(['report'])
+})
+
+test('換批次時被留下的子代理都沒有紀錄，就不寫紀錄', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1, agentId: 'a1', turnId: 'x' } as any)
+  control.state.set('logs', { byAgent: {} })
+  await $.turn.start({ text: '再派一個', turnId: 't2' })
+  const before = control.state.writes('logs')
+  await spawnAgent($)
+  expect(control.state.writes('logs') - before).toBe(0)
+})
+
+test('啟動時沒有要補上的子代理就不寫批次', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  const before = control.state.writes('batch')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/w' })
+  expect(control.state.writes('batch') - before).toBe(0)
+})
+
+test('Agent 結果沒有總計（背景子代理）時不寫批次', async ($, on) => {
+  const control = engine(on)
+  control.agentReply = { result: { agentId: 'a1' }, text: '' }
+  await start($)
+  await spawnAgent($)
+  const before = control.state.writes('batch')
+  await $.tool.call({ tool: 'Agent', description: 'x', prompt: 'y' } as any)
+  expect(control.state.writes('batch') - before).toBe(0)
+})
+
+test('/clear 時已經是空的 state 就不寫', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await $.session.end({ reason: 'clear' } as any)
+  expect(['batch', 'logs', 'selected'].map(key => control.state.writes(key))).toEqual([0, 0, 0])
 })
