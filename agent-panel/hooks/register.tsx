@@ -624,16 +624,18 @@ export const register: Register = on => {
         const header = statusLine(batch, now, columns - displayWidth(BACK_LABEL) - 1).map(span => ({ ...span, isDim: true }))
         // 返回列、卡片（文字列＋進度條；小人不比卡片高）、分隔線、紀錄。超過面板可見列數時最上面的返回會被捲出去，
         // 才在最下面再放一個；一頁放得下時兩個返回會同時出現，看起來重複。
-        // 最下面的返回包在跟文字一樣寬的 Box 裡：實機上 Button 自己的方框會涵蓋文字右邊的空白（游標移過去會反白、點了會返回），
-        // 而點擊只會往包含點擊位置的方框裡找，點在這個 Box 外面就碰不到 Button
+        // 最下面的返回後面接一個佔滿剩餘寬度的 Box（跟最上面的返回一樣，右邊有東西佔著）：實機上單獨一個 Button 的方框
+        // 會涵蓋文字右邊的空白（游標移過去會反白、點了會返回）；點擊只會往包含點擊位置的方框裡找，同一層先看後面的元件，
+        // 空白就落在這個 Box 上。不寫死寬度，desktop 的原生按鈕也不會被擠壓
         const card = agentCard(selectedAgent, cardOptions)
         const contentRows = 1 + card.lines.length + (card.bar.length > 0 ? 1 : 0) + 1 + detail.rows.length
         const bottomBack =
           contentRows > e.props.scroll.bodyRows
             ? [
                 blankRow(),
-                <Box width={displayWidth(BACK_LABEL)}>
+                <Box flexDirection="row">
                   <Button key="back-bottom" plain label={BACK_LABEL} onPress={() => showList($)} />
+                  <Box flexGrow={1} />
                 </Box>,
               ]
             : []

@@ -697,11 +697,16 @@ function parentOfKey(node: any, key: string): any {
   return undefined
 }
 
-// 點擊只會往包含點擊位置的方框裡找；實機上 Button 自己的方框會涵蓋文字右邊的空白（反白、點了會返回），
-// 所以外面包一個跟文字一樣寬的 Box，點在它外面就碰不到 Button
-test('最下面的返回包在跟文字一樣寬的 Box 裡，文字右邊的空白點了不會返回', async ($, on) => {
+// 點擊只會往包含點擊位置的方框裡找，同一層先看後面的元件：Button 後面接一個佔滿剩餘寬度的 Box，
+// 文字右邊的空白就落在那個 Box 上、碰不到 Button。不寫死寬度，desktop 的原生按鈕也不會被擠壓
+test('最下面的返回後面接一個佔滿剩餘寬度的 Box，不寫死寬度', async ($, on) => {
   setup(on, [row('a', { startedAt: 0 })], { selected: 'a', logs: twoEntries })
   const ui = await mount($, { bodyRows: 8 })
-  expect(parentOfKey(await ui.drawn(), 'back-bottom')?.props).toMatchObject({ width: displayWidth('← 返回') })
+  const parent = parentOfKey(await ui.drawn(), 'back-bottom')
+  expect(parent?.props).toMatchObject({ flexDirection: 'row' })
+  expect(parent?.props?.width).toBeUndefined()
+  const children = (parent?.children ?? []) as any[]
+  const buttonIndex = children.findIndex(child => child?.props?.key === 'back-bottom')
+  expect(children[buttonIndex + 1]).toMatchObject({ type: 'Box', props: { flexGrow: 1 } })
   await ui.unmount()
 })
