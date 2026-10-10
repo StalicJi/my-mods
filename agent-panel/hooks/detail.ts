@@ -30,13 +30,25 @@ export function formatOffset(ms: number): string {
   return `+${formatElapsed(ms)}`
 }
 
-export function detailRows(log: AgentLog, options: DetailOptions): Span[][] {
-  if (log.entries.length === 0 && log.dropped === 0) return [[{ text: EMPTY_HINT, isDim: true }]]
+// rows：紀錄區的每一列；newestRow：最新一筆的第一列在 rows 裡的位置（點開時捲到這裡），沒有紀錄是 -1
+export type DetailLayout = { rows: Span[][]; newestRow: number }
+
+export function detailLayout(log: AgentLog, options: DetailOptions): DetailLayout {
+  if (log.entries.length === 0 && log.dropped === 0) return { rows: [[{ text: EMPTY_HINT, isDim: true }]], newestRow: -1 }
   const times = log.entries.map(entry => formatOffset(entry.at - options.startedAt))
   // 時間欄依最寬的對齊，續行才能對到同一欄
   const layout: RowLayout = { ...options, timeWidth: Math.max(0, ...times.map(displayWidth)) }
-  const rows = log.entries.flatMap((entry, index) => entryRows(entry, padTime(times[index] ?? '', layout.timeWidth), layout))
-  return log.dropped > 0 ? [[{ text: `更早的 ${log.dropped} 筆已省略`, isDim: true }], ...rows] : rows
+  const rows: Span[][] = log.dropped > 0 ? [[{ text: `更早的 ${log.dropped} 筆已省略`, isDim: true }]] : []
+  let newestRow = -1
+  log.entries.forEach((entry, index) => {
+    newestRow = rows.length
+    rows.push(...entryRows(entry, padTime(times[index] ?? '', layout.timeWidth), layout))
+  })
+  return { rows, newestRow }
+}
+
+export function detailRows(log: AgentLog, options: DetailOptions): Span[][] {
+  return detailLayout(log, options).rows
 }
 
 // 依顯示寬度逐字硬切（中文 2 欄），'\n' 分段，空段落是空字串

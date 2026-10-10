@@ -1,11 +1,11 @@
 // Agent Panel：派出子代理時跳出面板，顯示這一回合每個子代理在做什麼、模型、用量與時間；
 // 面板沒放上畫面時在輸入框下方釘一行狀態列；/agents 開關
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, Timer, ToolCallInput } from 'claude-code'
+import type { EngineInterface, Register, Timer, ToolCallInput, UiScrollArgs } from 'claude-code'
 
 import type { AgentRow, Batch, Logs, TokenUsage } from '../types'
 import { addAgent, finishAgent, hasRunning, recordReported, recordStep, recordThinking, recordToolCall, seedRunning } from './batch'
-import { BACK_LABEL, detailRows } from './detail'
+import { BACK_LABEL, detailLayout } from './detail'
 import { addAnswer, addReport, addToolStart, agentLog, finishTool, forgetAgents, markUnfinished, toolEndOf } from './log'
 import {
   MASCOT_GAP,
@@ -25,6 +25,11 @@ import {
 import type { MascotKind, MascotPicture, Span } from './layout'
 
 const PANE_ID = 'agent-panel'
+// 詳細頁最新一筆的第一列；點開時捲到這裡
+const NEWEST_KEY = 'newest'
+// 寫入 selected 後詳細頁要等下一次重畫才出現：最新一筆還沒畫出來時捲動會被拒絕，每 50 毫秒再試，最多 5 次
+const SCROLL_RETRY_MS = 50
+const SCROLL_ATTEMPTS = 5
 const PANE_TITLE = 'Agents'
 // 停靠在右邊時要求的寬度；放在輸入框上方時 Claude Code 會忽略它
 const PANE_COLUMNS = 42
@@ -317,9 +322,22 @@ export async function showList($: EngineInterface): Promise<void> {
 export async function selectAgent($: EngineInterface, agentId: string): Promise<void> {
   try {
     await update($, selectedAtom, () => agentId)
-    await $.ui.scroll({ in: PANE_ID, to: 'end' }).catch(() => {})
+    await scrollToNewest({ scroll: args => $.ui.scroll(args), sleep: ms => $.clock.sleep(ms) })
   } catch {
     // 略過
+  }
+}
+
+// 捲動與等待從外面傳進來，重試的規則才能單獨測試（測試的 $ 沒有 clock）
+export type ScrollPort = { scroll: (args: UiScrollArgs) => Promise<{ deny?: string }>; sleep: (ms: number) => Promise<void> }
+
+// 把最新一筆捲到面板頂端：執行中的看得到最新進度，回報從標題開始讀。
+// 被拒絕或拋錯都重試：不確定詳細頁還沒畫出來時 host 回的是哪一種
+export async function scrollToNewest(port: ScrollPort): Promise<void> {
+  for (let attempt = 0; attempt < SCROLL_ATTEMPTS; attempt++) {
+    const result = await port.scroll({ in: PANE_ID, to: { key: NEWEST_KEY }, block: 'start' }).catch(() => ({ deny: '捲動失敗' }))
+    if (result.deny === undefined) return
+    await port.sleep(SCROLL_RETRY_MS)
   }
 }
 
@@ -483,6 +501,8 @@ export const register: Register = on => {
         ))}
       </Text>
     )
+    // 空一列放一個空白字元：跟其他列一樣是一個 Text，不用 margin，列數才跟 fullRowCount 對得上
+    const blankRow = () => <Text> </Text>
     const barRow = (cells: string[]) => (
       <Text>
         {'  '}
@@ -547,7 +567,7 @@ export const register: Register = on => {
       // 詳細頁：返回列（右邊淡色的整批狀態）、那個子代理的卡片、分隔線、紀錄。只有這裡讀 logs，清單不會因新增紀錄重畫
       if (selectedAgent !== undefined) {
         const logs = await read($, logsAtom)
-        const log = agentLog(logs, selectedAgent.id)
+        const detail = detailLayout(agentLog(logs, selectedAgent.id), { columns, now, startedAt: selectedAgent.startedAt })
         const header = statusLine(batch, now, columns - displayWidth(BACK_LABEL) - 1).map(span => ({ ...span, isDim: true }))
         return (
           <Box flexDirection="column">
@@ -557,7 +577,19 @@ export const register: Register = on => {
             </Box>
             {cardView(selectedAgent, false)}
             {spanRow([{ text: '─'.repeat(columns), isDim: true }])}
-            {detailRows(log, { columns, now, startedAt: selectedAgent.startedAt }).map(spanRow)}
+            {/* 最新一筆的第一列包在有 key 的 Box 裡（Text 沒有 key），點開時捲到這裡 */}
+            {detail.rows.map((spans, index) =>
+              index === detail.newestRow ? (
+                <Box key={NEWEST_KEY} flexDirection="column">
+                  {spanRow(spans)}
+                </Box>
+              ) : (
+                spanRow(spans)
+              ),
+            )}
+            {blankRow()}
+            {/* 捲在下面看紀錄時也點得到返回 */}
+            <Button key="back-bottom" plain label={BACK_LABEL} onPress={() => showList($)} />
           </Box>
         )
       }
@@ -567,8 +599,6 @@ export const register: Register = on => {
         { label: 'Failed', agents: failed },
         { label: 'Done', agents: done },
       ].filter(group => group.agents.length > 0)
-      // 空一列放一個空白字元：跟其他列一樣是一個 Text，不用 margin，列數才跟 fullRowCount 對得上
-      const blankRow = () => <Text> </Text>
       const body = isCompact
         ? [...running, ...failed, ...done].map(agent => openable(agent.id, spanRow(compactLine(agent, options))))
         : groups.flatMap((group, index) => [

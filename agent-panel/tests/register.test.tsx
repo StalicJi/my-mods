@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
+import { scrollToNewest } from '../hooks/register'
 import { stateStore } from './state-store'
 
 const USAGE = { input_tokens: 1000, output_tokens: 2000, cache_read_input_tokens: 10_000, cache_creation_input_tokens: 5000 }
@@ -573,4 +574,17 @@ test('工具在回應串流時就先執行：那一步的訊息排在它前面�
   await pending
   const entries = control.state.get('logs').byAgent.a1.entries
   expect(entries.map((entry: any) => [entry.kind, entry.at])).toEqual([['message', 1000], ['tool', 3000]])
+})
+
+test('scrollToNewest 把最新一筆捲到面板頂端；被拒絕或拋錯時等 50 毫秒再試，最多 5 次', async () => {
+  const target = { in: 'agent-panel', to: { key: 'newest' }, block: 'start' }
+  const calls: unknown[] = []
+  const sleeps: number[] = []
+  const replies: (() => Promise<{ deny?: string }>)[] = [() => Promise.resolve({ deny: '還沒畫出來' }), () => Promise.reject(new Error('沒有實作')), () => Promise.resolve({})]
+  await scrollToNewest({ scroll: async args => (calls.push(args), replies.shift()!()), sleep: async ms => void sleeps.push(ms) })
+  expect(calls).toEqual([target, target, target])
+  expect(sleeps).toEqual([50, 50])
+  const always: unknown[] = []
+  await scrollToNewest({ scroll: async args => (always.push(args), { deny: '一直不行' }), sleep: async () => {} })
+  expect(always).toHaveLength(5)
 })

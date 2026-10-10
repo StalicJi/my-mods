@@ -30,11 +30,19 @@ type SetupExtra = { logs?: Logs; selected?: string }
 
 // 代替 host 的時鐘與 state；同一個測試可以掛載好幾次。回傳 state 替身
 function setup(on: any, agents: AgentRow[] | null, extra: SetupExtra = {}) {
-  mock.clock(on)
+  const clock = mock.clock(on)
   const initial: Record<string, unknown> = agents === null ? {} : { batch: { turnId: 't1', agents } }
   if (extra.logs !== undefined) initial.logs = extra.logs
   if (extra.selected !== undefined) initial.selected = extra.selected
-  return { store: stateStore(on, initial) }
+  return { store: stateStore(on, initial), clock }
+}
+
+// 按下按鈕並等處理函式做完。點開詳細頁時捲動失敗會每 50 毫秒重試，重試前的等待要推進模擬時鐘才會結束
+async function pressSettled(ui: any, clock: any, key: string) {
+  let isDone = false
+  const pressing = ui.press({ key }).finally(() => (isDone = true))
+  for (let tick = 0; tick < 20 && !isDone; tick++) await clock.advance(50)
+  await pressing
 }
 
 const mount = ($: any, options: PaneOptions = {}) => $.ui.mount(paneOf(options) as any)
@@ -572,9 +580,9 @@ test('停靠時卡片標題列與精簡列是 plain 按鈕；放在輸入框上�
 // 測試的 state 是替身，寫入不會讓畫面自己重畫（host 才會），所以按下之後手動 redraw。
 // 點開時捲到最底下：測試套件在按鈕的處理函式裡沒有實作 ui.scroll，改在 cmux 實機驗證
 test('按標題切到詳細頁：返回列、卡片、分隔線、紀錄依序出現；詳細頁的卡片標題不是按鈕', async ($, on) => {
-  const { store } = setup(on, [row('a', { startedAt: 0 })], { logs: { byAgent: { a: { entries: [{ kind: 'tool', id: 'r1', at: 4000, summary: '讀取 config.ghostty', outcome: 'ok', errorLine: null }], dropped: 0 } } } })
+  const { store, clock } = setup(on, [row('a', { startedAt: 0 })], { logs: { byAgent: { a: { entries: [{ kind: 'tool', id: 'r1', at: 4000, summary: '讀取 config.ghostty', outcome: 'ok', errorLine: null }], dropped: 0 } } } })
   const ui = await mount($)
-  await ui.press({ key: 'open-a' })
+  await pressSettled(ui, clock, 'open-a')
   expect(store.get('selected')).toBe('a')
   await ui.redraw()
   expect(await ui.find({ key: 'back' })).toBeDefined()
@@ -609,9 +617,9 @@ test('沒有紀錄的子代理點開時顯示提示', async ($, on) => {
 
 // 測試套件在按鈕的處理函式裡沒有實作 ui.scroll，按下時捲動一定失敗：正好驗證捲動失敗也照樣切換
 test('捲動失敗時仍切到詳細頁', async ($, on) => {
-  const { store } = setup(on, [row('a')])
+  const { store, clock } = setup(on, [row('a')])
   const ui = await mount($)
-  await ui.press({ key: 'open-a' })
+  await pressSettled(ui, clock, 'open-a')
   expect(store.get('selected')).toBe('a')
   await ui.redraw()
   expect(await ui.find({ key: 'back' })).toBeDefined()
@@ -638,5 +646,21 @@ test('清單畫面不讀 logs', async ($, on) => {
   const ui = await mount($)
   await ui.drawn()
   expect(store.reads('logs')).toBe(0)
+  await ui.unmount()
+})
+
+test('詳細頁最新一筆的第一列有 key newest，最底下有第二個返回按鈕', async ($, on) => {
+  const entries = [
+    { kind: 'tool', id: 'r1', at: 4000, summary: '讀取 a', outcome: 'ok', errorLine: null },
+    { kind: 'tool', id: 'r2', at: 12_000, summary: '讀取 b', outcome: 'ok', errorLine: null },
+  ]
+  const { store } = setup(on, [row('a', { startedAt: 0 })], { selected: 'a', logs: { byAgent: { a: { entries, dropped: 0 } } } as Logs })
+  const ui = await mount($)
+  const newest = await ui.find({ key: 'newest' })
+  expect(newest).toBeDefined()
+  expect(textOf(newest)).toMatch(/^\+0:12 ✓ 讀取 b/)
+  expect(await ui.find({ key: 'back-bottom' })).toBeDefined()
+  await ui.press({ key: 'back-bottom' })
+  expect(store.get('selected')).toBeNull()
   await ui.unmount()
 })

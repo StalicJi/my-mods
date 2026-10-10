@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { detailRows, formatOffset, wrapToWidth } from '../hooks/detail'
+import { detailLayout, detailRows, formatOffset, wrapToWidth } from '../hooks/detail'
 import { displayWidth } from '../hooks/layout'
 import type { Span } from '../hooks/layout'
 import type { LogEntry } from '../types'
@@ -91,4 +91,13 @@ test('已省略提示與沒有紀錄的提示', () => {
 test('wrapToWidth：中文 2 欄、分段', () => {
   expect(wrapToWidth('中文字', 4)).toEqual(['中文', '字'])
   expect(wrapToWidth('ab\n\ncd', 10)).toEqual(['ab', '', 'cd'])
+})
+
+test('detailLayout 的 newestRow 指向最新一筆的第一列（算進已省略列與多列的紀錄）；沒有紀錄是 -1', () => {
+  const log = { entries: [tool(4000, '讀取 a', 'ok'), { kind: 'message', at: 10_000, text: '很長的一句話'.repeat(8) }, tool(12_000, '讀取 b', 'error', '找不到')] as LogEntry[], dropped: 2 }
+  const layout = detailLayout(log, options)
+  expect(layout.rows).toEqual(detailRows(log, options))
+  expect(texts(layout.rows)[layout.newestRow]).toBe('+0:12 ✗ 讀取 b')
+  expect(layout.newestRow).toBe(layout.rows.length - 2)
+  expect(detailLayout({ entries: [], dropped: 0 }, options).newestRow).toBe(-1)
 })
