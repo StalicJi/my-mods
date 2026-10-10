@@ -4,7 +4,7 @@ import { MASCOT_GAP, displayWidth, fullRowCount } from '../hooks/layout'
 import type { FullModeOptions } from '../hooks/layout'
 import { mascotRaster } from '../hooks/mascot'
 import { mascotImage } from '../hooks/mascot-image'
-import type { AgentRow } from '../types'
+import type { AgentRow, Logs } from '../types'
 import { stateStore } from './state-store'
 
 type PaneOptions = { bodyColumns?: number; placement?: 'dock' | 'inline'; bodyRows?: number; surface?: 'terminal' | 'desktop' }
@@ -26,10 +26,15 @@ const row = (id: string, patch: Partial<AgentRow> = {}): AgentRow => ({
 const done = (id: string, patch: Partial<AgentRow> = {}) => row(id, { status: 'done', endedAt: 5000, ...patch })
 const failed = (id: string, patch: Partial<AgentRow> = {}) => row(id, { status: 'failed', endedAt: 9000, failureReason: '已中斷', ...patch })
 
-// 代替 host 的時鐘與 state；同一個測試可以掛載好幾次
-function setup(on: any, agents: AgentRow[] | null) {
+type SetupExtra = { logs?: Logs; selected?: string }
+
+// 代替 host 的時鐘與 state；同一個測試可以掛載好幾次。回傳 state 替身
+function setup(on: any, agents: AgentRow[] | null, extra: SetupExtra = {}) {
   mock.clock(on)
-  stateStore(on, agents === null ? {} : { batch: { turnId: 't1', agents } })
+  const initial: Record<string, unknown> = agents === null ? {} : { batch: { turnId: 't1', agents } }
+  if (extra.logs !== undefined) initial.logs = extra.logs
+  if (extra.selected !== undefined) initial.selected = extra.selected
+  return { store: stateStore(on, initial) }
 }
 
 const mount = ($: any, options: PaneOptions = {}) => $.ui.mount(paneOf(options) as any)
@@ -550,4 +555,88 @@ test('熱重載重跑 session.start 時重新讀 CLAUDE_CODE_FORCE_TERMINAL_IMAG
   expect(await imagesOf(withoutImages)).toEqual([])
   expect(await rastersOf(withoutImages)).toHaveLength(1)
   await withoutImages.unmount()
+})
+
+test('停靠時卡片標題列與精簡列是 plain 按鈕；放在輸入框上方時沒有按鈕', async ($, on) => {
+  const ui = await mountWith($, on, [row('a'), done('d')])
+  expect((await ui.find({ key: 'open-a' }))?.props).toMatchObject({ plain: true })
+  await ui.unmount()
+  const compact = await mount($, { bodyRows: 3 })
+  expect(await compact.find({ key: 'open-d' })).toBeDefined()
+  await compact.unmount()
+  const inline = await mount($, { placement: 'inline' })
+  expect(countNodes(await inline.drawn(), node => node.type === 'Button')).toBe(0)
+  await inline.unmount()
+})
+
+// 測試的 state 是替身，寫入不會讓畫面自己重畫（host 才會），所以按下之後手動 redraw。
+// 點開時捲到最底下：測試套件在按鈕的處理函式裡沒有實作 ui.scroll，改在 cmux 實機驗證
+test('按標題切到詳細頁：返回列、卡片、分隔線、紀錄依序出現；詳細頁的卡片標題不是按鈕', async ($, on) => {
+  const { store } = setup(on, [row('a', { startedAt: 0 })], { logs: { turnId: 't1', byAgent: { a: { entries: [{ kind: 'tool', id: 'r1', at: 4000, summary: '讀取 config.ghostty', outcome: 'ok', errorLine: null }], dropped: 0 } } } })
+  const ui = await mount($)
+  await ui.press({ key: 'open-a' })
+  expect(store.get('selected')).toBe('a')
+  await ui.redraw()
+  expect(await ui.find({ key: 'back' })).toBeDefined()
+  expect(await ui.find({ key: 'open-a' })).toBeUndefined()
+  const rows = drawnRows(await ui.drawn())
+  const title = rows.findIndex(line => line.startsWith('● Explore · 任務 a'))
+  const separator = rows.findIndex(line => /^─+$/.test(line))
+  expect(rows[0]).toMatch(/^Agents/)
+  expect(title).toBeGreaterThan(0)
+  expect(separator).toBeGreaterThan(title)
+  expect(rows[separator + 1]).toBe('+0:04 ✓ 讀取 config.ghostty')
+  await ui.unmount()
+})
+
+test('按返回回到清單，selected 清空', async ($, on) => {
+  const { store } = setup(on, [row('a')], { selected: 'a' })
+  const ui = await mount($)
+  await ui.press({ key: 'back' })
+  expect(store.get('selected')).toBeNull()
+  await ui.redraw()
+  expect(await ui.find({ key: 'back' })).toBeUndefined()
+  expect(await ui.find({ key: 'open-a' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('沒有紀錄的子代理點開時顯示提示', async ($, on) => {
+  setup(on, [row('a')], { selected: 'a' })
+  const ui = await mount($)
+  expect(drawnRows(await ui.drawn())).toContain('mod 載入前的紀錄沒有保留')
+  await ui.unmount()
+})
+
+// 測試套件在按鈕的處理函式裡沒有實作 ui.scroll，按下時捲動一定失敗：正好驗證捲動失敗也照樣切換
+test('捲動失敗時仍切到詳細頁', async ($, on) => {
+  const { store } = setup(on, [row('a')])
+  const ui = await mount($)
+  await ui.press({ key: 'open-a' })
+  expect(store.get('selected')).toBe('a')
+  await ui.redraw()
+  expect(await ui.find({ key: 'back' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('selected 不在這一批時畫清單', async ($, on) => {
+  setup(on, [row('a')], { selected: 'gone' })
+  const ui = await mount($)
+  expect(await ui.find({ key: 'back' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('放在輸入框上方時畫清單，但不清掉 selected', async ($, on) => {
+  const { store } = setup(on, [row('a')], { selected: 'a' })
+  const ui = await mount($, { placement: 'inline' })
+  expect(await ui.find({ key: 'back' })).toBeUndefined()
+  expect(store.get('selected')).toBe('a')
+  await ui.unmount()
+})
+
+test('清單畫面不讀 logs', async ($, on) => {
+  const { store } = setup(on, [row('a')])
+  const ui = await mount($)
+  await ui.drawn()
+  expect(store.reads('logs')).toBe(0)
+  await ui.unmount()
 })

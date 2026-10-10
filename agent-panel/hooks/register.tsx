@@ -5,7 +5,8 @@ import type { EngineInterface, Register, Timer, ToolCallInput } from 'claude-cod
 
 import type { AgentRow, Batch, Logs, TokenUsage } from '../types'
 import { addAgent, finishAgent, hasRunning, recordReported, recordStep, recordThinking, recordToolCall, seedRunning } from './batch'
-import { addAnswer, addReport, addToolStart, finishTool, markUnfinished, toolEndOf } from './log'
+import { BACK_LABEL, detailRows } from './detail'
+import { addAnswer, addReport, addToolStart, agentLog, finishTool, markUnfinished, toolEndOf } from './log'
 import type { LogTarget } from './log'
 import {
   MASCOT_GAP,
@@ -14,6 +15,7 @@ import {
   colorRuns,
   compactLine,
   describeTool,
+  displayWidth,
   fullRowCount,
   groupEntries,
   mascotLayout,
@@ -306,6 +308,16 @@ export async function showList($: EngineInterface): Promise<void> {
   }
 }
 
+// 打開某個子代理的詳細頁並捲到最新一筆；捲動失敗（例如被拒絕）也照樣切換
+export async function selectAgent($: EngineInterface, agentId: string): Promise<void> {
+  try {
+    await update($, selectedAtom, () => agentId)
+    await $.ui.scroll({ in: PANE_ID, to: 'end' }).catch(() => {})
+  } catch {
+    // 略過
+  }
+}
+
 // 報告文字在 message；欄位名稱改了時退回取第一個字串參數，不讓回報整個消失
 function handbackText(call: ToolCallInput): string | null {
   const fields = call as unknown as Record<string, unknown>
@@ -445,10 +457,11 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // 面板：第一列是狀態列，下面依 Running → Failed → Done 分組畫卡片，或精簡模式一個子代理一列；版面規則都在 layout.ts
+  // 面板：第一列是狀態列，下面依 Running → Failed → Done 分組畫卡片，或精簡模式一個子代理一列；版面規則都在 layout.ts。
+  // 停靠在右邊時標題列可以點，點了切到那個子代理的詳細頁（紀錄區的組版在 detail.ts）
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
     const elements = $.ui.resolve(e)
-    const { Box, Text } = elements
+    const { Box, Text, Button } = elements
     // Raster、Image 只有終端機畫得出來：其他介面的 resolve 照樣給，但畫成空的 fragment，所以看 surface，不畫小人、寬度留給文字
     const Raster = e.surface === 'terminal' && 'Raster' in elements ? elements.Raster : undefined
     const Image = e.surface === 'terminal' && 'Image' in elements ? elements.Image : undefined
@@ -474,8 +487,20 @@ export const register: Register = on => {
     )
     // 畫面丟例外時 Claude Code 會卸載窗格、要再打 /agents 才回來；這裡接住，畫一行提示
     try {
-      const [batch, frame] = await Promise.all([read($, batchAtom), read($, tickAtom)])
+      const [batch, frame, selected] = await Promise.all([read($, batchAtom), read($, tickAtom), read($, selectedAtom)])
       if (batch === null) return <Text dimColor>{EMPTY_HINT}</Text>
+
+      // 只有停靠時能點、能看詳細頁；放在輸入框上方時照舊畫清單，selected 留著，回到停靠時繼續顯示
+      const isDocked = e.props.placement === 'dock'
+      const selectedAgent = isDocked && selected !== null ? batch.agents.find(agent => agent.id === selected) : undefined
+      const openable = (agentId: string, row: JSX.Element) =>
+        isDocked ? (
+          <Button key={`open-${agentId}`} plain onPress={() => selectAgent($, agentId)}>
+            {row}
+          </Button>
+        ) : (
+          row
+        )
 
       const columns = e.props.bodyColumns
       const now = await $.clock.now()
@@ -487,9 +512,11 @@ export const register: Register = on => {
       // 放在輸入框上方時會擠掉對話的空間；完整模式要捲動才看得完時，也改成一個子代理一列
       const isCompact = e.props.placement === 'inline' || fullRowCount(batch, layout) > e.props.scroll.bodyRows
       const cardOptions = { ...options, columns: layout.textColumns }
-      const cardRows = (agent: AgentRow) => {
+      // canOpen：標題列要不要包成按鈕（清單要、詳細頁裡那張卡片不要）
+      const cardRows = (agent: AgentRow, canOpen: boolean) => {
         const card = agentCard(agent, cardOptions)
-        return [...card.lines.map(spanRow), ...(card.bar.length > 0 ? [barRow(card.bar)] : [])]
+        const lines = card.lines.map((line, index) => (index === 0 && canOpen ? openable(agent.id, spanRow(line)) : spanRow(line)))
+        return [...lines, ...(card.bar.length > 0 ? [barRow(card.bar)] : [])]
       }
       // 種類是照拿得到的元件選的，這裡判斷 undefined 只為了讓型別收窄
       const mascotView = (agentId: string, mascot: MascotPicture) => {
@@ -500,15 +527,33 @@ export const register: Register = on => {
         return Raster && <Raster key={key} columns={mascot.columns} rows={mascot.rows} cells={mascot.cells} />
       }
       // 小人在左、隔一欄接卡片；小人不比卡片高（見 agentMascot），畫面列數仍跟 fullRowCount 一致
-      const cardView = (agent: AgentRow) => {
-        if (layout.mascot === null) return cardRows(agent)
+      const cardView = (agent: AgentRow, canOpen: boolean) => {
+        if (layout.mascot === null) return cardRows(agent, canOpen)
         const mascot = agentMascot(agent, { now, frame, kind: layout.mascot })
         return [
           <Box flexDirection="row" columnGap={MASCOT_GAP}>
             {mascotView(agent.id, mascot)}
-            <Box flexDirection="column">{cardRows(agent)}</Box>
+            <Box flexDirection="column">{cardRows(agent, canOpen)}</Box>
           </Box>,
         ]
+      }
+
+      // 詳細頁：返回列（右邊淡色的整批狀態）、那個子代理的卡片、分隔線、紀錄。只有這裡讀 logs，清單不會因新增紀錄重畫
+      if (selectedAgent !== undefined) {
+        const logs = await read($, logsAtom)
+        const log = agentLog(logs, { turnId: batch.turnId, agentId: selectedAgent.id })
+        const header = statusLine(batch, now, columns - displayWidth(BACK_LABEL) - 1).map(span => ({ ...span, isDim: true }))
+        return (
+          <Box flexDirection="column">
+            <Box flexDirection="row" columnGap={1}>
+              <Button key="back" plain label={BACK_LABEL} onPress={() => showList($)} />
+              {spanRow(header)}
+            </Box>
+            {cardView(selectedAgent, false)}
+            {spanRow([{ text: '─'.repeat(columns), isDim: true }])}
+            {detailRows(log, { columns, now, startedAt: selectedAgent.startedAt }).map(spanRow)}
+          </Box>
+        )
       }
 
       const groups = [
@@ -519,13 +564,13 @@ export const register: Register = on => {
       // 空一列放一個空白字元：跟其他列一樣是一個 Text，不用 margin，列數才跟 fullRowCount 對得上
       const blankRow = () => <Text> </Text>
       const body = isCompact
-        ? [...running, ...failed, ...done].map(agent => spanRow(compactLine(agent, options)))
+        ? [...running, ...failed, ...done].map(agent => openable(agent.id, spanRow(compactLine(agent, options))))
         : groups.flatMap((group, index) => [
             // 組與組之間空一列
             ...(index > 0 ? [blankRow()] : []),
             <Text dimColor>{group.label}</Text>,
             // 同組卡片之間要不要空一列（小人跟卡片一樣高時）由 groupEntries 決定，fullRowCount 也照它算
-            ...groupEntries(group.agents, layout).flatMap(entry => (entry.kind === 'blank' ? [blankRow()] : cardView(entry.agent))),
+            ...groupEntries(group.agents, layout).flatMap(entry => (entry.kind === 'blank' ? [blankRow()] : cardView(entry.agent, true))),
           ])
 
       return (
