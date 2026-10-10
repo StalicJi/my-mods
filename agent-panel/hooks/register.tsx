@@ -73,6 +73,9 @@ let toolSequence = 0
 // 交回過報告的子代理：最後的回覆常跟報告相同（不重複記、不寫），只有它們的回覆要先讀 logs 確認有沒有變化；
 // 其他子代理的回覆一定會新增一筆，直接寫。熱重載後清空，最多多寫一次
 const agentsWithReport = new Set<string>()
+// /clear 的次數：寫詳細頁紀錄的工作開始時記下，寫入時（更新函式裡）發現已經 /clear 過就原樣回傳。
+// 免得 /clear 之前開始、之後才寫進去的紀錄，替不在任何批次的子代理重建一份（孤兒紀錄，之後也不會被清掉）
+let clearCount = 0
 
 type SpawnFacts = { id: string; description: string; agentType: string; agentName: string | null; isNested: boolean }
 type FinishReason = 'answer' | 'aborted' | 'error' | 'refusal'
@@ -201,6 +204,12 @@ async function updateBatchIfChanged(
   return written.value
 }
 
+// 包住新增紀錄的更新函式：開始記錄（clearsAtStart）之後 /clear 過就原樣回傳，不重建已清掉的紀錄。
+// 只讀模組變數、沒有副作用，…IfChanged 跑兩次也沒關係
+function unlessClearedSince(clearsAtStart: number, change: (logs: Logs | null) => Logs | null) {
+  return (logs: Logs | null) => (clearCount === clearsAtStart ? change(logs) : logs)
+}
+
 // 下面的記錄都只觀察：出錯就略過這次，不影響子代理本身
 async function recordSpawn($: EngineInterface, spawn: SpawnFacts) {
   try {
@@ -268,9 +277,10 @@ async function recordTool($: EngineInterface, agentId: string, call: ToolCallInp
 // 工具開始：卡片記下正在做什麼，詳細頁加一筆執行中的紀錄；回傳紀錄 id，結果回來時用它找回同一筆，沒記下時回傳 null
 async function recordToolStart($: EngineInterface, agentId: string, call: ToolCallInput): Promise<string | null> {
   const id = call.tool_use_id ?? `${agentId}-${++toolSequence}`
+  const clearsAtStart = clearCount
   let isLogged = false
   await recordTool($, agentId, call, async start => {
-    await update($, logsAtom, logs => addToolStart(logs, agentId, { id, ...start }))
+    await update($, logsAtom, unlessClearedSince(clearsAtStart, logs => addToolStart(logs, agentId, { id, ...start })))
     isLogged = true
   })
   return isLogged ? id : null
@@ -279,9 +289,10 @@ async function recordToolStart($: EngineInterface, agentId: string, call: ToolCa
 // 交回報告：卡片照樣算一次工具，詳細頁記成回報，不另外記成一筆工具
 async function recordHandback($: EngineInterface, agentId: string, call: ToolCallInput) {
   const text = handbackText(call)
+  const clearsAtStart = clearCount
   await recordTool($, agentId, call, async start => {
     if (text === null) return
-    await update($, logsAtom, logs => addReport(logs, agentId, { at: start.at, text }))
+    await update($, logsAtom, unlessClearedSince(clearsAtStart, logs => addReport(logs, agentId, { at: start.at, text })))
     agentsWithReport.add(agentId)
   })
 }
@@ -327,8 +338,9 @@ async function recordToolEnd($: EngineInterface, agentId: string, toolId: string
 // 交回過報告的子代理，這段話可能跟報告相同而沒有變化，才先讀 logs 確認；其他直接寫，每步只讀一次 logs
 async function recordAnswer($: EngineInterface, agentId: string, answer: { at: number; text: string; isFinal: boolean }) {
   try {
+    const clearsAtStart = clearCount
     if (!(await isInBatch($, agentId))) return
-    const change = (logs: Logs | null) => addAnswer(logs, agentId, answer)
+    const change = unlessClearedSince(clearsAtStart, logs => addAnswer(logs, agentId, answer))
     if (agentsWithReport.has(agentId)) await updateLogsIfChanged($, change)
     else await update($, logsAtom, change)
   } catch {
@@ -442,8 +454,13 @@ export const register: Register = on => {
     stopTimer()
     clearStatus($)
     if (e.reason === 'clear') {
+      // 先記下 /clear：之前開始、還沒寫進去的紀錄，寫入時會發現而不重建
+      clearCount++
+      // 批次與 selected 已經是空的就不寫：進行中的寫入不會把它們從空的重建（只有新派的子代理會，那是正常的）
       await updateBatchIfChanged($, () => null).catch(() => {})
-      await updateLogsIfChanged($, () => null).catch(() => {})
+      // 紀錄一律寫成空的、不先讀再決定：進行中的寫入可能在讀之後才寫進去；一定寫的話兩邊會撞版本，
+      // 重試的那一方發現已經 /clear 過就不寫，最後一定是空的
+      await update($, logsAtom, () => null).catch(() => {})
       agentsWithReport.clear()
       await showList($)
     }

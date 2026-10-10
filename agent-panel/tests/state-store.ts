@@ -10,16 +10,27 @@ export function stateStore(on: any, initial: Record<string, unknown> = {}) {
   const operations: string[] = []
   // 寫入一律被拒絕的 key，模擬 host 寫入失敗
   const failingKeys = new Set<string>()
+  // 下一次讀或寫要先停住的 key（get:key、set:key）：用來把別的事件插進 mod 的讀寫之間
+  const holds = new Map<string, { reached: () => void; released: Promise<void> }>()
+  async function waitIfHeld(operation: string) {
+    const hold = holds.get(operation)
+    if (hold === undefined) return
+    holds.delete(operation)
+    hold.reached()
+    await hold.released
+  }
   for (const [key, value] of Object.entries(initial)) held.set(key, { value, version: 1 })
   for (const key of ['batch', 'tick', 'logs', 'selected']) {
     const ref = { plugin: 'agent-panel', key }
-    on('state.get', ref, () => {
+    on('state.get', ref, async () => {
       readCounts.set(key, (readCounts.get(key) ?? 0) + 1)
       operations.push(`get:${key}`)
+      await waitIfHeld(`get:${key}`)
       return { value: { value: held.get(key)?.value, version: held.get(key)?.version ?? 0 } }
     })
-    on('state.set', ref, (_$: any, e: any) => {
+    on('state.set', ref, async (_$: any, e: any) => {
       operations.push(`set:${key}`)
+      await waitIfHeld(`set:${key}`)
       if (failingKeys.has(key)) return { deny: 'test: 寫入被拒絕' }
       const version = held.get(key)?.version ?? 0
       if (e.ifVersion !== undefined && e.ifVersion !== version) return { value: { isSet: false, version } }
@@ -37,5 +48,14 @@ export function stateStore(on: any, initial: Record<string, unknown> = {}) {
     reads: (key: string) => readCounts.get(key) ?? 0,
     operations: () => [...operations],
     failWrites: (key: string) => failingKeys.add(key),
+    // 讓下一次 get:key 或 set:key 停住；reached 在停住時完成，release() 讓它繼續（讀到的是放行當下的值）
+    holdNext(operation: string) {
+      let reached = () => {}
+      let release = () => {}
+      const isReached = new Promise<void>(resolve => (reached = resolve))
+      const released = new Promise<void>(resolve => (release = resolve))
+      holds.set(operation, { reached, released })
+      return { reached: isReached, release }
+    },
   }
 }

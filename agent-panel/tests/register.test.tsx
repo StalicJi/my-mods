@@ -757,11 +757,11 @@ test('Agent 結果沒有總計（背景子代理）時不寫批次', async ($, o
   expect(control.state.writes('batch') - before).toBe(0)
 })
 
-test('/clear 時已經是空的 state 就不寫', async ($, on) => {
+test('/clear 時批次與 selected 已經是空的就不寫；紀錄一律寫成空的（進行中的寫入可能在讀之後才寫進去）', async ($, on) => {
   const control = engine(on)
   await start($)
   await $.session.end({ reason: 'clear' } as any)
-  expect(['batch', 'logs', 'selected'].map(key => control.state.writes(key))).toEqual([0, 0, 0])
+  expect(['batch', 'logs', 'selected'].map(key => control.state.writes(key))).toEqual([0, 1, 0])
 })
 
 // 結束時同步狀態列重新讀批次（幾個子代理同時結束時，比沿用剛寫入的批次不容易拿到過時的資料），所以是 3 次
@@ -835,4 +835,31 @@ test('寫卡片失敗時，詳細頁的工具紀錄照樣寫，結果回來也�
   control.state.failWrites('batch')
   await $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'r1' } as any)
   expect(control.state.get('logs').byAgent.a1.entries).toEqual([expect.objectContaining({ id: 'r1', outcome: 'ok' })])
+})
+
+test('/clear 發生在確認子代理在這一批之後、讀紀錄之前：不會替它重建一份孤兒紀錄', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  const hold = control.state.holdNext('get:logs')
+  const calling = $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'r1' } as any)
+  await hold.reached
+  await $.session.end({ reason: 'clear' } as any)
+  hold.release()
+  await calling
+  expect(control.state.get('logs')).toBeNull()
+})
+
+test('/clear 讀到紀錄還是空的，但進行中的寫入在那之後才寫進去：最後紀錄仍然是空的', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  // 停在新紀錄已經算好、正要寫入的時候
+  const hold = control.state.holdNext('set:logs')
+  const calling = $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'r1' } as any)
+  await hold.reached
+  await $.session.end({ reason: 'clear' } as any)
+  hold.release()
+  await calling
+  expect(control.state.get('logs')).toBeNull()
 })
