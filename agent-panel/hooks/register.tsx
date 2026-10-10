@@ -175,6 +175,7 @@ async function isInBatch($: EngineInterface, agentId: string) {
 
 // 更新函式回傳原物件代表沒有變化：先用目前的值算一次，沒變就不寫，免得面板白白重畫；
 // 有變才交給 update，讀完到寫入之間被改過的話它會用最新的值重算。
+// 更新函式因此至少會跑兩次，必須是純函式：不能在裡面設外部變數（像 recordSpawn 的 isNewBatch）或有其他副作用。
 // atom 只能直接放在 read／update 的第一個參數（host 靠它掃出讀寫哪些 state），所以 logs 與 batch 各一個
 async function updateLogsIfChanged($: EngineInterface, change: (logs: Logs | null) => Logs | null) {
   const current = await read($, logsAtom)
@@ -277,7 +278,7 @@ async function recordFinish($: EngineInterface, agentId: string, reason: FinishR
 }
 
 // 詳細頁的紀錄：只記這一批裡的子代理（Claude Code 的內部 fork 也帶 agentId，但不在這一批）。
-// 用在可能沒有變化的更新：子代理結束時常常沒有執行中的工具、最後的回覆常跟已交回的報告相同
+// 用在可能沒有變化的更新：最後的回覆常跟已交回的報告相同
 async function updateLog($: EngineInterface, agentId: string, change: (logs: Logs | null) => Logs | null) {
   if (!(await isInBatch($, agentId))) return
   await updateLogsIfChanged($, change)
@@ -323,10 +324,11 @@ async function recordAnswer($: EngineInterface, agentId: string, answer: { at: n
   }
 }
 
-// 子代理結束時結果還沒回來的工具（中斷、失敗、熱重載）不會再更新，標成未完成
+// 子代理結束時結果還沒回來的工具（中斷、失敗、熱重載）不會再更新，標成未完成。
+// 不用先確認在不在這一批：fork 沒有紀錄，markUnfinished 對沒有紀錄或沒有執行中工具的子代理回傳原物件，就不寫
 async function recordUnfinished($: EngineInterface, agentId: string) {
   try {
-    await updateLog($, agentId, logs => markUnfinished(logs, agentId))
+    await updateLogsIfChanged($, logs => markUnfinished(logs, agentId))
   } catch {
     // 略過
   }

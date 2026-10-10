@@ -140,3 +140,20 @@ test('換行快取放得下一整頁：紀錄滾動（丟掉最舊一筆、加�
     previous = current
   }
 })
+
+test('換行快取放得下兩種寬度的一整頁：兩種寬度輪流重畫時都用快取', () => {
+  const wrapPage = (width: number) => Array.from({ length: MAX_ENTRIES }, (_, index) => wrapCached(`第 ${index} 則雙寬度訊息`, width))
+  const narrow = wrapPage(30)
+  const wide = wrapPage(40)
+  wrapPage(30).forEach((lines, index) => expect(lines).toBe(narrow[index]))
+  wrapPage(40).forEach((lines, index) => expect(lines).toBe(wide[index]))
+})
+
+test('wrapCached 回傳唯讀陣列，呼叫端改不到快取裡的換行結果', () => {
+  const lines = wrapCached('唯讀檢查', 30)
+  // 只檢查型別、不執行：回傳型別是 readonly string[]，push 是型別錯誤
+  // @ts-expect-error
+  const mutate = () => lines.push('x')
+  expect(typeof mutate).toBe('function')
+  expect(lines).toEqual(['唯讀檢查'])
+})

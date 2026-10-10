@@ -763,3 +763,15 @@ test('/clear 時已經是空的 state 就不寫', async ($, on) => {
   await $.session.end({ reason: 'clear' } as any)
   expect(['batch', 'logs', 'selected'].map(key => control.state.writes(key))).toEqual([0, 0, 0])
 })
+
+test('子代理結束時只有標成完成那段讀批次（確認在這一批、寫入、同步狀態列共 3 次），標未完成的工具不再讀；不在這一批的 fork 結束時不寫紀錄', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  const before = control.state.reads('batch')
+  await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1, agentId: 'a1', turnId: 'x' } as any)
+  expect(control.state.reads('batch') - before).toBe(3)
+  const writesBefore = control.state.writes('logs')
+  await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1, agentId: 'fork-1', turnId: 'y' } as any)
+  expect(control.state.writes('logs')).toBe(writesBefore)
+})

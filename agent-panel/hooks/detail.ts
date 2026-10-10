@@ -24,10 +24,10 @@ const TOOL_ICONS: Record<ToolOutcome, { icon: string; color?: string }> = {
   unfinished: { icon: '·' },
 }
 // 子代理執行中面板每 0.2 秒重畫一次，回報最長幾百列：換行結果依（寬度、文字）快取，不每次重算。
-// 一頁最多 MAX_ENTRIES 筆訊息或回報要換行，上限放得下一整頁；滿了丟最久沒用到的那筆（LRU），
-// 紀錄滾動時只有新的那筆要算，不會整個清空重算
-const WRAP_CACHE_LIMIT = MAX_ENTRIES
-const wrapCache = new Map<string, string[]>()
+// 一頁最多 MAX_ENTRIES 筆訊息或回報要換行；上限放得下兩種寬度的一整頁（例如兩個介面同時畫，或寬度剛變），
+// 滿了丟最久沒用到的那筆（LRU），紀錄滾動時只有新的那筆要算，不會整個清空重算
+const WRAP_CACHE_LIMIT = 2 * MAX_ENTRIES
+const wrapCache = new Map<string, readonly string[]>()
 
 export function formatOffset(ms: number): string {
   return `+${formatElapsed(ms)}`
@@ -121,8 +121,8 @@ function padTime(time: string, timeWidth: number) {
   return time + ' '.repeat(Math.max(0, timeWidth - displayWidth(time)))
 }
 
-// 回傳的陣列跟快取共用，呼叫端不能改它。Map 依加入順序排：用到就移到最後，最前面就是最久沒用到的
-export function wrapCached(text: string, width: number): string[] {
+// 回傳的陣列跟快取共用，所以是唯讀的。Map 依加入順序排：用到就移到最後，最前面就是最久沒用到的
+export function wrapCached(text: string, width: number): readonly string[] {
   const key = `${width}|${text}`
   const cached = wrapCache.get(key)
   if (cached !== undefined) {
