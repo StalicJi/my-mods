@@ -175,7 +175,7 @@ export function mascotLayout(bodyColumns: number, kind: MascotKind | null): Full
   return textColumns >= MIN_TEXT_COLUMNS_WITH_MASCOT ? { mascot: kind, textColumns } : { mascot: null, textColumns: bodyColumns }
 }
 
-// 方塊版：執行中的卡片 5 列畫 4 列高的大小人；完成 2 列、失敗 3 列只放得下 2 列高的小小人，小人才不會把卡片撐高。
+// 方塊版：執行中的卡片 5 列畫 3 列高、會走路的大小人；完成 2 列、失敗 3 列畫 2 列高、沒有腳的小小人，小人才不會把卡片撐高。
 // 圖片版各狀態都是 4 欄 × 2 列，像素夠細，不用分大小
 export function agentMascot(row: AgentRow, options: { now: number; frame: number; kind: MascotKind }): MascotPicture {
   const look = agentLook(row)

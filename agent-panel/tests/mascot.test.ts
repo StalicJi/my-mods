@@ -16,7 +16,7 @@ const WIDE_CHAR = /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/
 // 字母、數字、標點、符號、一般空白；控制字元、組合符號、格式字元都不算可列印
 const PRINTABLE = /^[\p{L}\p{N}\p{P}\p{S}\p{Zs}]$/u
 
-const ROWS: Record<MascotSize, number> = { large: 4, small: 2 }
+const ROWS: Record<MascotSize, number> = { large: 3, small: 2 }
 // 先確認尺寸對，下面逐格比對的測試才不會因為空陣列而空轉通過
 const grid = (look: number, size: MascotSize, state: MascotState, frame = 0) => {
   const cells = mascotGrid({ look, size, state, frame })
@@ -49,13 +49,13 @@ const decodeWords = (base64: string) => {
   return { byteLength: bytes.length, words: Array.from({ length: bytes.length / 4 }, (_, index) => view.getUint32(index * 4, true)) }
 }
 
-test('尺寸：large 7×4、small 7×2，mascotRaster 的 columns／rows 跟 grid 一致', () => {
-  expect(MASCOT_COLUMNS).toBe(7)
+test('尺寸：large 5×3、small 5×2，mascotRaster 的 columns／rows 跟 grid 一致', () => {
+  expect(MASCOT_COLUMNS).toBe(5)
   for (const look of looks()) {
     for (const state of STATES) {
       const large = grid(look, 'large', state)
       const small = grid(look, 'small', state)
-      expect(large).toHaveLength(4)
+      expect(large).toHaveLength(3)
       expect(small).toHaveLength(2)
       for (const row of [...large, ...small]) expect(row).toHaveLength(MASCOT_COLUMNS)
       // 兩個眼睛在同一列
@@ -66,9 +66,17 @@ test('尺寸：large 7×4、small 7×2，mascotRaster 的 columns／rows 跟 gri
     }
   }
   const raster = mascotRaster({ look: 0, size: 'large', state: 'running', frame: 0 })
-  expect([raster.columns, raster.rows]).toEqual([7, 4])
+  expect([raster.columns, raster.rows]).toEqual([5, 3])
   const smallRaster = mascotRaster({ look: 0, size: 'small', state: 'done', frame: 0 })
-  expect([smallRaster.columns, smallRaster.rows]).toEqual([7, 2])
+  expect([smallRaster.columns, smallRaster.rows]).toEqual([5, 2])
+  for (const size of SIZES) {
+    for (const state of STATES) {
+      const options = { look: 0, size, state, frame: 0 }
+      const cells = mascotGrid(options)
+      const { columns, rows } = mascotRaster(options)
+      expect([columns, rows]).toEqual([cells[0]!.length, cells.length])
+    }
+  }
 })
 
 test('編碼：標準 base64，解回 little-endian u32 是每格 [codePoint, 前景, 背景]', () => {
@@ -116,16 +124,38 @@ test('字元：全部是寬度 1 的 BMP 可列印字元', () => {
   }
 })
 
-test('造型：至少 6 種，每種的配件形狀與顏色都不同，也不跟身體色撞色', () => {
-  expect(LOOK_COUNT).toBeGreaterThanOrEqual(6)
-  const shapes = looks().map(look => chars(grid(look, 'large', 'running')).join('\n'))
-  expect(new Set(shapes).size).toBe(LOOK_COUNT)
-  const palettes = looks().map(look => accessoryColors(grid(look, 'large', 'running')))
-  expect(new Set(palettes.map(colors => colors.join(','))).size).toBe(LOOK_COUNT)
-  for (const colors of palettes) {
-    expect(colors.length).toBeGreaterThan(0)
-    for (const bodyColor of [BODY_ORANGE, STALLED_YELLOW, FAILED_GRAY]) expect(colors).not.toContain(bodyColor)
+test('造型：7 種，large 與 small 各自的配件形狀與顏色都不同，也不跟身體色撞色', () => {
+  expect(LOOK_COUNT).toBe(7)
+  for (const size of SIZES) {
+    const shapes = looks().map(look => chars(grid(look, size, 'running')).join('\n'))
+    expect(new Set(shapes).size).toBe(LOOK_COUNT)
+    const palettes = looks().map(look => accessoryColors(grid(look, size, 'running')))
+    expect(new Set(palettes.map(colors => colors.join(','))).size).toBe(LOOK_COUNT)
+    for (const colors of palettes) {
+      expect(colors.length).toBeGreaterThan(0)
+      for (const bodyColor of [BODY_ORANGE, STALLED_YELLOW, FAILED_GRAY]) expect(colors).not.toContain(bodyColor)
+    }
   }
+})
+
+test('配件只畫在最上面一列：下面的身體每種造型都一樣，最上面一列每種都不同', () => {
+  for (const size of SIZES) {
+    for (const state of STATES) {
+      const grids = looks().map(look => grid(look, size, state))
+      expect(new Set(grids.map(cells => JSON.stringify(cells.slice(1)))).size).toBe(1)
+      expect(new Set(grids.map(cells => JSON.stringify(cells[0]))).size).toBe(LOOK_COUNT)
+    }
+  }
+})
+
+test('身形：眼睛那一列兩側伸出小手；large 多一列身體與腳，停著兩隻腳著地、走路輪流抬一隻', () => {
+  const bodyRows = (size: MascotSize, state: MascotState, frame = 0) => chars(grid(0, size, state, frame)).slice(1)
+  expect(bodyRows('large', 'stalled')).toEqual(['▄•█•▄', ' █▀█ '])
+  expect(bodyRows('large', 'done')).toEqual(['▄^█^▄', ' █▀█ '])
+  expect(bodyRows('large', 'running', 0)).toEqual(['▄•█•▄', ' █▀▀ '])
+  expect(bodyRows('large', 'running', 3)).toEqual(['▄•█•▄', ' ▀▀█ '])
+  expect(bodyRows('small', 'done')).toEqual(['▄^█^▄'])
+  expect(bodyRows('small', 'failed')).toEqual(['▄×█×▄'])
 })
 
 test('造型依 look 取餘數：負數、很大的數、非有限數都不會壞', () => {
@@ -148,7 +178,8 @@ test('running 依 frame 換腳：每 3 拍（0.6 秒）換一次，只有最下�
     expect(at(3)).not.toEqual(at(0))
     expect(at(5)).toEqual(at(3))
     expect(at(6)).toEqual(at(0))
-    expect(at(3).slice(0, 3)).toEqual(at(0).slice(0, 3))
+    expect(at(3).slice(0, -1)).toEqual(at(0).slice(0, -1))
+    expect(at(3).at(-1)).not.toEqual(at(0).at(-1))
   }
 })
 
@@ -164,7 +195,7 @@ test('stalled、done、failed 停止走路，small 沒有腳，都不隨 frame �
   }
 })
 
-test('狀態：stalled 身體變黃、failed 身體變灰且眼睛 ×、done 的眼睛跟 running 不同', () => {
+test('狀態：stalled 身體變黃、failed 身體變灰且眼睛 ×、done 眼睛 ^、running 眼睛 •', () => {
   for (const look of looks()) {
     for (const size of SIZES) {
       const eyesOf = (state: MascotState) => eyeCells(grid(look, size, state))
@@ -175,9 +206,9 @@ test('狀態：stalled 身體變黃、failed 身體變灰且眼睛 ×、done 的
       expect(eyesOf('failed').map(cell => [cell.char, cell.background])).toEqual([['×', FAILED_GRAY], ['×', FAILED_GRAY]])
       expect(colorsOf('failed')).not.toContain(BODY_ORANGE)
       expect(colorsOf('done')).toContain(BODY_ORANGE)
-      const runningEye = eyesOf('running')[0]!.char
-      expect(eyesOf('done').map(cell => cell.char)).not.toContain(runningEye)
-      expect(eyesOf('done')[0]!.char).not.toBe('×')
+      expect(eyesOf('running').map(cell => cell.char)).toEqual(['•', '•'])
+      expect(eyesOf('stalled').map(cell => cell.char)).toEqual(['•', '•'])
+      expect(eyesOf('done').map(cell => [cell.char, cell.background])).toEqual([['^', BODY_ORANGE], ['^', BODY_ORANGE]])
       // 眼睛用深色，在身體上看得清楚
       for (const state of STATES) for (const eye of eyesOf(state)) expect(eye.foreground).not.toBe(eye.background)
     }

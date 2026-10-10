@@ -242,9 +242,9 @@ test('寬面板的完整模式：每張卡片左邊一隻小人，執行中大�
   const ui = await mountWith($, on, [done('d', { look: 2 }), row('a', { look: 0 }), failed('f', { look: 1 })])
   const rasters = await rastersOf(ui)
   expect(rasters.map(raster => [raster.key, raster.props.columns, raster.props.rows])).toEqual([
-    ['mascot-a', 7, 4],
-    ['mascot-f', 7, 2],
-    ['mascot-d', 7, 2],
+    ['mascot-a', 5, 3],
+    ['mascot-f', 5, 2],
+    ['mascot-d', 5, 2],
   ])
   expect(rasters.map(raster => raster.props.cells)).toEqual([
     mascotRaster({ look: 0, size: 'large', state: 'running', frame: 0 }).cells,
@@ -254,15 +254,15 @@ test('寬面板的完整模式：每張卡片左邊一隻小人，執行中大�
   await ui.unmount()
 })
 
-test('畫上小人後：卡片文字少 8 欄、狀態列仍是整個寬度，小人跟文字隔 1 欄、不比卡片高，列數仍等於 fullRowCount', async ($, on) => {
+test('畫上小人後：卡片文字少 6 欄、狀態列仍是整個寬度，小人跟文字隔 1 欄、不比卡片高，列數仍等於 fullRowCount', async ($, on) => {
   const agents = [row('a'), failed('f'), done('d')]
   const ui = await mountWith($, on, agents)
   const drawn = await ui.drawn()
   const rows = drawnRows(drawn)
   expect(rows).toHaveLength(rowCountOf(agents, { mascot: 'raster' }))
   expect(displayWidth(rows[0]!)).toBe(42)
-  expect(rows.filter(line => CARD_TITLE.test(line)).map(displayWidth)).toEqual([34, 34, 34])
-  expect(rows.filter(line => line.includes('▆')).map(displayWidth)).toEqual([34])
+  expect(rows.filter(line => CARD_TITLE.test(line)).map(displayWidth)).toEqual([36, 36, 36])
+  expect(rows.filter(line => line.includes('▆')).map(displayWidth)).toEqual([36])
   const cards = mascotCards(drawn)
   expect(cards).toHaveLength(3)
   for (const card of cards) {
@@ -287,11 +287,11 @@ test('精簡模式不畫小人：放在輸入框上方，或完整模式放不�
 
 test('面板太窄（文字剩不到 24 欄）不畫小人，卡片照舊用整個寬度', async ($, on) => {
   setup(on, [row('a'), done('d')])
-  const narrow = await mount($, { bodyColumns: 31 })
+  const narrow = await mount($, { bodyColumns: 29 })
   expect(await rastersOf(narrow)).toEqual([])
-  expect(drawnRows(await narrow.drawn()).filter(line => CARD_TITLE.test(line)).map(displayWidth)).toEqual([31, 31])
+  expect(drawnRows(await narrow.drawn()).filter(line => CARD_TITLE.test(line)).map(displayWidth)).toEqual([29, 29])
   await narrow.unmount()
-  const enough = await mount($, { bodyColumns: 32 })
+  const enough = await mount($, { bodyColumns: 30 })
   expect(await rastersOf(enough)).toHaveLength(2)
   expect(drawnRows(await enough.drawn()).filter(line => CARD_TITLE.test(line)).map(displayWidth)).toEqual([24, 24])
   await enough.unmount()
@@ -347,7 +347,7 @@ test('畫小人時，執行中與失敗卡片之間不多空列，空行只在�
 test('不畫小人時（面板太窄、終端機以外的介面、精簡模式）完成卡片之間不空列', async ($, on) => {
   const agents = [done('d1'), done('d2')]
   setup(on, agents)
-  for (const options of [{ bodyColumns: 31 }, { surface: 'desktop' as const }]) {
+  for (const options of [{ bodyColumns: 29 }, { surface: 'desktop' as const }]) {
     const ui = await mount($, options)
     const rows = drawnRows(await ui.drawn())
     expect(rows).toHaveLength(rowCountOf(agents, { mascot: null }))
@@ -438,7 +438,7 @@ test('終端機以外的介面就算設了 CLAUDE_CODE_FORCE_TERMINAL_IMAGES 也
   await ui.unmount()
 })
 
-test('圖片版：卡片文字少 5 欄（方塊版少 8 欄）、狀態列仍是整個寬度，小人跟文字隔 1 欄、不比卡片高，列數等於 fullRowCount', async ($, on) => {
+test('圖片版：卡片文字少 5 欄（方塊版少 6 欄）、狀態列仍是整個寬度，小人跟文字隔 1 欄、不比卡片高，列數等於 fullRowCount', async ($, on) => {
   const agents = [row('a'), failed('f'), done('d')]
   const ui = await mountWithImages($, on, agents)
   const drawn = await ui.drawn()

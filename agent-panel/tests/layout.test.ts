@@ -281,12 +281,13 @@ test('卡片實際列數與 fullRowCount 用的一致', () => {
   expect(rowsOf(agentCard(row({ status: 'done', endedAt: 9000 }), options))).toBe(2)
 })
 
-test('方塊版小人的版面：扣掉小人 7 欄與間隔 1 欄，文字還有 24 欄才畫，不然寬度全留給文字', () => {
+test('方塊版小人的版面：扣掉小人 5 欄與間隔 1 欄，文字還有 24 欄才畫（面板 30 欄起），不然寬度全留給文字', () => {
   expect([MASCOT_GAP, MIN_TEXT_COLUMNS_WITH_MASCOT]).toEqual([1, 24])
-  expect(mascotLayout(42, 'raster')).toEqual({ mascot: 'raster', textColumns: 34 })
-  expect(mascotLayout(32, 'raster')).toEqual({ mascot: 'raster', textColumns: 24 })
-  expect(mascotLayout(31, 'raster')).toEqual({ mascot: null, textColumns: 31 })
+  expect(mascotLayout(42, 'raster')).toEqual({ mascot: 'raster', textColumns: 36 })
+  expect(mascotLayout(30, 'raster')).toEqual({ mascot: 'raster', textColumns: 24 })
+  expect(mascotLayout(29, 'raster')).toEqual({ mascot: null, textColumns: 29 })
   expect(mascotLayout(20, 'raster')).toEqual({ mascot: null, textColumns: 20 })
+  for (let bodyColumns = 30; bodyColumns <= 80; bodyColumns++) expect(mascotLayout(bodyColumns, 'raster').textColumns).toBe(bodyColumns - 6)
 })
 
 test('圖片版小人的版面：扣掉小人 4 欄與間隔 1 欄，文字還有 24 欄才畫，不然寬度全留給文字', () => {
@@ -302,17 +303,17 @@ test('拿不到小人（例如桌面版）時不畫，寬度全留給文字', ()
   expect(mascotLayout(20, null)).toEqual({ mascot: null, textColumns: 20 })
 })
 
-test('方塊版小人：執行中畫大的（7×4）、完成與失敗畫小的（7×2），造型取 look，動畫拍數照傳', () => {
+test('方塊版小人：執行中畫大的（5×3）、完成與失敗畫小的（5×2），造型取 look，動畫拍數照傳', () => {
   const picture = (look: number, size: MascotSize, state: MascotState, frame: number) => ({ kind: 'raster', ...mascotRaster({ look, size, state, frame }) })
   const options = { now: 2000, frame: 3, kind: 'raster' } as const
   const running = agentMascot(row({ look: 2 }), options)
-  expect([running.columns, running.rows]).toEqual([7, 4])
+  expect([running.columns, running.rows]).toEqual([5, 3])
   expect(running).toEqual(picture(2, 'large', 'running', 3))
   const done = agentMascot(row({ look: 5, status: 'done', endedAt: 1000 }), options)
-  expect([done.columns, done.rows]).toEqual([7, 2])
+  expect([done.columns, done.rows]).toEqual([5, 2])
   expect(done).toEqual(picture(5, 'small', 'done', 3))
   const failed = agentMascot(row({ look: 1, status: 'failed', failureReason: '已中斷', endedAt: 1000 }), options)
-  expect([failed.columns, failed.rows]).toEqual([7, 2])
+  expect([failed.columns, failed.rows]).toEqual([5, 2])
   expect(failed).toEqual(picture(1, 'small', 'failed', 3))
 })
 
