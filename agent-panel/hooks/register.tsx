@@ -95,10 +95,10 @@ async function closePanel($: EngineInterface) {
 }
 
 // 有子代理在跑時：面板放上畫面就跑動畫，沒放上就在輸入框下方釘一行狀態列；都沒在跑就停計時器、清狀態列。
-// 不在動畫的每一拍呼叫，所以狀態列不放會一直跳的耗時
-export async function syncTimerAndStatus($: EngineInterface): Promise<void> {
+// 不在動畫的每一拍呼叫，所以狀態列不放會一直跳的耗時。knownBatch：呼叫端剛寫入的批次，有給就不再讀一次
+export async function syncTimerAndStatus($: EngineInterface, knownBatch?: Batch | null): Promise<void> {
   try {
-    const { batch, isPanelPlaced } = await readPanelState($)
+    const { batch, isPanelPlaced } = await readPanelState($, knownBatch)
     const isRunning = batch !== null && hasRunning(batch)
     showStatus($, isRunning && !isPanelPlaced ? statusText(batch) : undefined)
     if (!isRunning || !isPanelPlaced) {
@@ -111,8 +111,8 @@ export async function syncTimerAndStatus($: EngineInterface): Promise<void> {
   }
 }
 
-async function readPanelState($: EngineInterface) {
-  const [batch, panes] = await Promise.all([read($, batchAtom), $.ui.panes()])
+async function readPanelState($: EngineInterface, knownBatch?: Batch | null) {
+  const [batch, panes] = await Promise.all([knownBatch !== undefined ? knownBatch : read($, batchAtom), $.ui.panes()])
   return { batch, isPanelPlaced: isPanePlaced(panes) }
 }
 
@@ -166,8 +166,8 @@ function isOwnMessage(originKind: string, text: string) {
   return (originKind === 'composer' || originKind === 'bridge') && !text.trimStart().startsWith('/')
 }
 
-// Claude Code 自己的內部 fork（例如 compaction）也帶 agentId，但不在這一批。
-// update 就算拿回同一個值也會寫一次、讓面板重畫，所以先讀過確認；更新函式裡照樣會再檢查，讀完到寫入之間批次換了也不會寫錯
+// Claude Code 自己的內部 fork（例如 compaction）也帶 agentId，但不在這一批；詳細頁的紀錄只記這一批的子代理，寫 logs 前先確認。
+// 批次本身的寫入不用它：用 updateBatchIfChanged，更新函式找不到這個子代理時回傳原物件，就不寫
 async function isInBatch($: EngineInterface, agentId: string) {
   const batch = await read($, batchAtom)
   return batch !== null && batch.agents.some(agent => agent.id === agentId)
@@ -183,10 +183,12 @@ async function updateLogsIfChanged($: EngineInterface, change: (logs: Logs | nul
   await update($, logsAtom, change)
 }
 
-async function updateBatchIfChanged($: EngineInterface, change: (batch: Batch | null) => Batch | null) {
+// 回傳寫入後的批次（update 會回傳它寫入的值）；沒有變化、沒寫時回傳 undefined。
+// 記錄子代理的更新函式找不到這個子代理時回傳原物件，所以 undefined 也代表它不在這一批
+async function updateBatchIfChanged($: EngineInterface, change: (batch: Batch | null) => Batch | null): Promise<Batch | null | undefined> {
   const current = await read($, batchAtom)
-  if (change(current) === current) return
-  await update($, batchAtom, change)
+  if (change(current) === current) return undefined
+  return update($, batchAtom, change)
 }
 
 // 下面的記錄都只觀察：出錯就略過這次，不影響子代理本身
@@ -219,9 +221,8 @@ async function recordSpawn($: EngineInterface, spawn: SpawnFacts) {
 // 送出請求就是開始思考：在請求送出前記下，不等結果
 async function recordThinkingStart($: EngineInterface, agentId: string) {
   try {
-    if (!(await isInBatch($, agentId))) return
     const at = await $.clock.now()
-    await update($, batchAtom, batch => (batch === null ? batch : recordThinking(batch, agentId, at)))
+    await updateBatchIfChanged($, batch => (batch === null ? batch : recordThinking(batch, agentId, at)))
   } catch {
     // 略過
   }
@@ -229,8 +230,7 @@ async function recordThinkingStart($: EngineInterface, agentId: string) {
 
 async function recordStepUsage($: EngineInterface, agentId: string, step: { model: string; effort?: string | number; usage: TokenUsage | null }) {
   try {
-    if (!(await isInBatch($, agentId))) return
-    await update($, batchAtom, batch => (batch === null ? batch : recordStep(batch, agentId, step)))
+    await updateBatchIfChanged($, batch => (batch === null ? batch : recordStep(batch, agentId, step)))
   } catch {
     // 略過
   }
@@ -240,12 +240,12 @@ async function recordStepUsage($: EngineInterface, agentId: string, step: { mode
 // 不在這一批（Claude Code 的內部 fork）或記錄失敗時回傳 null，詳細頁也不記
 async function recordTool($: EngineInterface, agentId: string, call: ToolCallInput): Promise<ToolStart | null> {
   try {
-    if (!(await isInBatch($, agentId))) return null
     const start: ToolStart = { summary: describeTool(call.tool, call), at: await $.clock.now() }
-    await update($, batchAtom, batch => (batch === null ? batch : recordToolCall(batch, agentId, start.summary, start.at)))
+    const written = await updateBatchIfChanged($, batch => (batch === null ? batch : recordToolCall(batch, agentId, start.summary, start.at)))
+    if (written === undefined) return null
     // 面板可能先在背景等待、終端機拉寬後才放上畫面，或被使用者按 ✕ 關掉，這些都沒有事件通知；
-    // 趁工具呼叫補啟動動畫，或補上輸入框下方的狀態列
-    if (timer === undefined) await syncTimerAndStatus($)
+    // 趁工具呼叫補啟動動畫，或補上輸入框下方的狀態列（沿用剛寫入的批次，不再讀一次）
+    if (timer === undefined) await syncTimerAndStatus($, written)
     return start
   } catch {
     return null
@@ -268,10 +268,12 @@ async function recordAgentResult($: EngineInterface, record: unknown) {
 
 async function recordFinish($: EngineInterface, agentId: string, reason: FinishReason) {
   try {
-    if (!(await isInBatch($, agentId))) return
     const endedAt = await $.clock.now()
-    await update($, batchAtom, batch => (batch === null ? batch : finishAgent(batch, agentId, reason, endedAt)))
-    await syncTimerAndStatus($)
+    const written = await updateBatchIfChanged($, batch => (batch === null ? batch : finishAgent(batch, agentId, reason, endedAt)))
+    // 同步時重新讀批次，不沿用剛寫入的：幾個子代理幾乎同時結束時，較晚完成的同步若拿到較早的批次，
+    // 會以為還有子代理在跑，動畫與狀態列停在執行中，之後也沒有事件來更正。重新讀不能完全排除（讀的當下別人可能還沒寫），
+    // 但時間窗只剩「寫入到讀取」這一小段；工具呼叫那裡沿用剛寫入的批次沒關係，那個子代理結束時還會再同步一次
+    if (written !== undefined) await syncTimerAndStatus($)
   } catch {
     // 略過
   }

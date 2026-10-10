@@ -764,7 +764,8 @@ test('/clear 時已經是空的 state 就不寫', async ($, on) => {
   expect(['batch', 'logs', 'selected'].map(key => control.state.writes(key))).toEqual([0, 0, 0])
 })
 
-test('子代理結束時只有標成完成那段讀批次（確認在這一批、寫入、同步狀態列共 3 次），標未完成的工具不再讀；不在這一批的 fork 結束時不寫紀錄', async ($, on) => {
+// 結束時同步狀態列重新讀批次（幾個子代理同時結束時，比沿用剛寫入的批次不容易拿到過時的資料），所以是 3 次
+test('子代理結束時讀 3 次批次（確認在這一批、寫入、同步狀態列重新讀），標未完成的工具不讀；不在這一批的 fork 結束時不寫紀錄', async ($, on) => {
   const control = engine(on)
   await start($)
   await spawnAgent($)
@@ -775,3 +776,27 @@ test('子代理結束時只有標成完成那段讀批次（確認在這一批�
   await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1, agentId: 'fork-1', turnId: 'y' } as any)
   expect(control.state.writes('logs')).toBe(writesBefore)
 })
+
+test('面板沒放上畫面（只有狀態列）時，子代理的一次工具呼叫也只讀 2 次批次，狀態列照舊顯示執行中', async ($, on) => {
+  const control = engine(on)
+  control.isPlaced = false
+  await start($)
+  await spawnAgent($)
+  const before = control.state.reads('batch')
+  await $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'r1' } as any)
+  expect(control.state.reads('batch') - before).toBe(2)
+  // 同步狀態列沿用剛寫入的批次：子代理還在跑，狀態列不會被清掉
+  expect(control.statuses.at(-1)).toContain('●1')
+})
+
+test('不在這一批的 fork 走完一步、呼叫一次工具、結束，都不寫批次', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  const before = control.state.writes('batch')
+  await step($, 'fork-1')
+  await $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'fork-1', tool_use_id: 'f1' } as any)
+  await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1, agentId: 'fork-1', turnId: 'z' } as any)
+  expect(control.state.writes('batch') - before).toBe(0)
+})
+
