@@ -55,7 +55,7 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
   on('tool.call', (_$: any, e: any) =>
     e.tool === 'Agent'
       ? { result: { agentId: 'a1', totalTokens: 26_000, totalToolUseCount: 12 }, text: '' }
-      : control.toolReplies.shift() ?? { result: {}, text: 'ok' },
+      : answerTool(control.toolReplies.shift()),
   )
   on('ui.scroll', (_$: any, e: any) => {
     control.scrolls.push(e)
@@ -80,6 +80,12 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
   })
   on('agent.list', () => ({ value: control.listed }))
   return control
+}
+
+// 排定的工具結果；{ throws } 代表工具執行時 engine 直接拋例外，排完了回成功
+function answerTool(reply: any) {
+  if (reply?.throws !== undefined) throw new Error(reply.throws)
+  return reply ?? { result: {}, text: 'ok' }
 }
 
 async function start($: any, turnId = 't1') {
@@ -662,4 +668,18 @@ test('/agents-focus 跟 /agents focus 一樣：面板關著時從清單開始打
   await $.command.run({ command: 'agents-focus', args: '' } as any)
   expect(control.closes).toHaveLength(1)
   expect(control.state.get('selected')).toBe('a1')
+})
+
+test('工具執行時拋例外：紀錄改成出錯並留例外訊息第一行，不會一直停在執行中', async ($, on) => {
+  const control = engine(on)
+  control.toolReplies.push({ throws: '工具壞掉了\n細節' })
+  await start($)
+  await spawnAgent($)
+  await $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'r1' } as any).catch(() => {})
+  // 測試套件會略過拋例外的替身，改拋「no implementation for tool.call」，所以只驗證記成出錯、原因列有文字；
+  // 取第一行的規則在 log.test 的 firstErrorLine 驗證
+  const [entry] = control.state.get('logs').byAgent.a1.entries
+  expect(entry).toMatchObject({ kind: 'tool', id: 'r1', summary: '讀取 w/a.ts', outcome: 'error' })
+  expect(typeof entry.errorLine).toBe('string')
+  expect(entry.errorLine.length).toBeGreaterThan(0)
 })

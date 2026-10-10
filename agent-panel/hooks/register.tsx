@@ -486,7 +486,15 @@ export const register: Register = on => {
         return next(e)
       }
       const toolId = await recordToolStart($, e.agentId, e)
-      const result = await next(e)
+      let result: Awaited<ReturnType<typeof next>>
+      try {
+        result = await next(e)
+      } catch (error) {
+        // 工具執行時拋例外：不記結束的話這一筆會一直停在執行中，直到子代理結束。記成出錯後照樣往外丟
+        const message = error instanceof Error ? error.message : String(error)
+        if (toolId !== null) await recordToolEnd($, e.agentId, toolId, { isError: true, text: message })
+        throw error
+      }
       if (toolId !== null) await recordToolEnd($, e.agentId, toolId, result)
       return result
     }
