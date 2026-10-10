@@ -28,8 +28,6 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
     // 每次請求依序回的 answer、toolUses、stopReason，沒排就是只呼叫工具的空回覆
     // waitFor：請求停在串流中，等測試放行才結束（模擬 Claude Code 在 tool_use 一到就先執行工具）
     stepReplies: [] as { answer?: string; toolUses?: object[]; stopReason?: string; waitFor?: Promise<void> }[],
-    // $.ui.scroll 收到的參數
-    scrolls: [] as unknown[],
     // $.command.register 收到的參數
     registered: [] as any[],
   }
@@ -55,10 +53,6 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
     }
   })
   on('tool.call', (_$: any, e: any) => (e.tool === 'Agent' ? control.agentReply : answerTool(control.toolReplies.shift())))
-  on('ui.scroll', (_$: any, e: any) => {
-    control.scrolls.push(e)
-    return { value: {} }
-  })
   on('command.register', (_$: any, e: any) => {
     control.registered.push(e)
     return { value: undefined }
