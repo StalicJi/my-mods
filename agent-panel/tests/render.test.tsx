@@ -655,7 +655,8 @@ test('詳細頁最新一筆的第一列有 key newest，最底下有第二個返
     { kind: 'tool', id: 'r2', at: 12_000, summary: '讀取 b', outcome: 'ok', errorLine: null },
   ]
   const { store } = setup(on, [row('a', { startedAt: 0 })], { selected: 'a', logs: { byAgent: { a: { entries, dropped: 0 } } } as Logs })
-  const ui = await mount($)
+  // 內容超過一頁時才有最下面的返回：6 列的面板放不下這 9 列
+  const ui = await mount($, { bodyRows: 6 })
   const newest = await ui.find({ key: 'newest' })
   expect(newest).toBeDefined()
   expect(textOf(newest)).toMatch(/^\+0:12 ✓ 讀取 b/)
@@ -663,4 +664,23 @@ test('詳細頁最新一筆的第一列有 key newest，最底下有第二個返
   await ui.press({ key: 'back-bottom' })
   expect(store.get('selected')).toBeNull()
   await ui.unmount()
+})
+
+// 執行中的卡片 5 列（4 列文字＋進度條），加上返回列、分隔線與 2 筆紀錄，共 9 列
+const twoEntries = {
+  byAgent: { a: { entries: [
+    { kind: 'tool', id: 'r1', at: 4000, summary: '讀取 a', outcome: 'ok', errorLine: null },
+    { kind: 'tool', id: 'r2', at: 12_000, summary: '讀取 b', outcome: 'ok', errorLine: null },
+  ], dropped: 0 } },
+} as Logs
+
+test('內容一頁放得下時不顯示最下面的返回：9 列剛好放得下就不顯示，8 列放不下才顯示', async ($, on) => {
+  setup(on, [row('a', { startedAt: 0 })], { selected: 'a', logs: twoEntries })
+  const fits = await mount($, { bodyRows: 9 })
+  expect(await fits.find({ key: 'back' })).toBeDefined()
+  expect(await fits.find({ key: 'back-bottom' })).toBeUndefined()
+  await fits.unmount()
+  const overflows = await mount($, { bodyRows: 8 })
+  expect(await overflows.find({ key: 'back-bottom' })).toBeDefined()
+  await overflows.unmount()
 })
