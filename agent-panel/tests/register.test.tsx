@@ -30,10 +30,20 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
     stepReplies: [] as { answer?: string; toolUses?: object[]; stopReason?: string; waitFor?: Promise<void> }[],
     // $.command.register 收到的參數
     registered: [] as any[],
+    // 下一次 $.ui.panes 回答前先停住（見 holdNextPanes）
+    panesHold: null as null | { reached: () => void; released: Promise<void> },
   }
   on('prompt.submit', () => ({ text: '' }))
   on('session.end', () => ({ sessionId: 's' }))
-  on('ui.panes', () => ({ value: control.panes }))
+  on('ui.panes', async () => {
+    const hold = control.panesHold
+    if (hold !== null) {
+      control.panesHold = null
+      hold.reached()
+      await hold.released
+    }
+    return { value: control.panes }
+  })
   on('ui.close', (_$: any, e: any) => {
     control.closes.push(e)
     control.panes = control.panes.filter(pane => pane.id !== e.id)
@@ -78,6 +88,16 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
 function answerTool(reply: any) {
   if (reply?.throws !== undefined) throw new Error(reply.throws)
   return reply ?? { result: {}, text: 'ok' }
+}
+
+// 讓下一次 $.ui.panes 停住，用來把別的事件插進同步狀態列的讀取之間；reached 在停住時完成，release() 讓它回答
+function holdNextPanes(control: any) {
+  let reached = () => {}
+  let release = () => {}
+  const isReached = new Promise<void>(resolve => (reached = resolve))
+  const released = new Promise<void>(resolve => (release = resolve))
+  control.panesHold = { reached, released }
+  return { reached: isReached, release }
 }
 
 async function start($: any, turnId = 't1') {
@@ -764,7 +784,7 @@ test('/clear 時批次與 selected 已經是空的就不寫；紀錄一律寫成
   expect(['batch', 'logs', 'selected'].map(key => control.state.writes(key))).toEqual([0, 1, 0])
 })
 
-// 結束時同步狀態列重新讀批次（幾個子代理同時結束時，比沿用剛寫入的批次不容易拿到過時的資料），所以是 3 次
+// 結束時同步狀態列重新讀批次（幾個子代理同時結束時，最後開始的同步要讀到所有寫入之後的批次），所以是 3 次
 test('子代理結束時讀 3 次批次（確認在這一批、寫入、同步狀態列重新讀），標未完成的工具不讀；不在這一批的 fork 結束時不寫紀錄', async ($, on) => {
   const control = engine(on)
   await start($)
@@ -862,4 +882,24 @@ test('/clear 讀到紀錄還是空的，但進行中的寫入在那之後才寫�
   hold.release()
   await calling
   expect(control.state.get('logs')).toBeNull()
+})
+
+test('兩個子代理幾乎同時結束：較早開始的同步讀到還有子代理在跑、卻較晚完成時，狀態列最後仍會清掉', async ($, on) => {
+  const control = engine(on)
+  control.isPlaced = false
+  await start($)
+  await spawnAgent($)
+  await spawnAgent($)
+  expect(control.statuses.at(-1)).toContain('●2')
+  // a1 結束後的同步已經讀到批次（a2 還在跑），停在問窗格
+  const hold = holdNextPanes(control)
+  const finishingFirst = $.turn.complete({ reason: 'answer', answer: '', durationMs: 1, agentId: 'a1', turnId: 'x' } as any)
+  await hold.reached
+  // a2 結束並同步完：都結束了，狀態列清掉
+  await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1, agentId: 'a2', turnId: 'y' } as any)
+  expect(control.statuses.at(-1)).toBeUndefined()
+  // a1 的同步這時才完成
+  hold.release()
+  await finishingFirst
+  expect(control.statuses.at(-1)).toBeUndefined()
 })

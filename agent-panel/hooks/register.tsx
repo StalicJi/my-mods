@@ -73,6 +73,10 @@ let toolSequence = 0
 // 交回過報告的子代理：最後的回覆常跟報告相同（不重複記、不寫），只有它們的回覆要先讀 logs 確認有沒有變化；
 // 其他子代理的回覆一定會新增一筆，直接寫。熱重載後清空，最多多寫一次
 const agentsWithReport = new Set<string>()
+// 同步狀態列與動畫的序號：只套用最後開始的那次同步。幾個子代理幾乎同時結束時，較早開始的同步可能讀到
+// 還有子代理在跑的批次，若它較晚完成又照樣套用，狀態列與動畫會停在執行中；改變執行狀態的寫入（派出、結束）
+// 之後都會同步，最後開始的那次讀到的是所有寫入之後的批次
+let syncSequence = 0
 // /clear 的次數：寫詳細頁紀錄的工作開始時記下，寫入時（更新函式裡）發現已經 /clear 過就原樣回傳。
 // 免得 /clear 之前開始、之後才寫進去的紀錄，替不在任何批次的子代理重建一份（孤兒紀錄，之後也不會被清掉）
 let clearCount = 0
@@ -103,8 +107,11 @@ async function closePanel($: EngineInterface) {
 // 有子代理在跑時：面板放上畫面就跑動畫，沒放上就在輸入框下方釘一行狀態列；都沒在跑就停計時器、清狀態列。
 // 不在動畫的每一拍呼叫，所以狀態列不放會一直跳的耗時。knownBatch：呼叫端剛寫入的批次，有給就不再讀一次
 export async function syncTimerAndStatus($: EngineInterface, knownBatch?: Batch | null): Promise<void> {
+  const sequence = ++syncSequence
   try {
     const { batch, isPanelPlaced } = await readPanelState($, knownBatch)
+    // 讀取期間又有新的同步開始：讓它決定，這次讀到的可能已經過時
+    if (sequence !== syncSequence) return
     const isRunning = batch !== null && hasRunning(batch)
     showStatus($, isRunning && !isPanelPlaced ? statusText(batch) : undefined)
     if (!isRunning || !isPanelPlaced) {
@@ -315,9 +322,9 @@ async function recordFinish($: EngineInterface, agentId: string, reason: FinishR
   try {
     const endedAt = await $.clock.now()
     const written = await updateBatchIfChanged($, batch => (batch === null ? batch : finishAgent(batch, agentId, reason, endedAt)))
-    // 同步時重新讀批次，不沿用剛寫入的：幾個子代理幾乎同時結束時，較晚完成的同步若拿到較早的批次，
-    // 會以為還有子代理在跑，動畫與狀態列停在執行中，之後也沒有事件來更正。重新讀不能完全排除（讀的當下別人可能還沒寫），
-    // 但時間窗只剩「寫入到讀取」這一小段；工具呼叫那裡沿用剛寫入的批次沒關係，那個子代理結束時還會再同步一次
+    // 同步時重新讀批次，不沿用剛寫入的：幾個子代理幾乎同時結束時，最後開始的同步要讀到所有寫入之後的批次
+    // （syncTimerAndStatus 只套用最後開始的那次）。工具呼叫那裡沿用剛寫入的批次沒關係：那時子代理還在跑，
+    // 頂多計數晚一點更新，那個子代理結束時還會再同步一次
     if (written !== undefined) await syncTimerAndStatus($)
   } catch {
     // 略過
