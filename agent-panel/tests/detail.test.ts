@@ -1,0 +1,94 @@
+import { expect, test } from 'claude-code/testing'
+
+import { detailRows, formatOffset, wrapToWidth } from '../hooks/detail'
+import { displayWidth } from '../hooks/layout'
+import type { Span } from '../hooks/layout'
+import type { LogEntry } from '../types'
+
+const options = { columns: 40, now: 122_000, startedAt: 0 }
+const texts = (rows: Span[][]) => rows.map(row => row.map(span => span.text).join(''))
+const tool = (at: number, summary: string, outcome: string, errorLine: string | null = null) =>
+  ({ kind: 'tool', id: `${at}`, at, summary, outcome, errorLine }) as LogEntry
+
+test('formatOffset', () => {
+  expect(formatOffset(4000)).toBe('+0:04')
+  expect(formatOffset(3_723_000)).toBe('+1:02:03')
+  expect(formatOffset(-5)).toBe('+0:00')
+})
+
+test('工具五種狀態的圖示、顏色與錯誤列', () => {
+  const rows = detailRows({ entries: [
+    tool(4000, '讀取 config.ghostty', 'ok'),
+    tool(12_000, '讀取 GhosttyConfig.swift', 'error', 'File does not exist'),
+    tool(13_000, '執行：rm -rf /', 'denied', '不允許'),
+    tool(14_000, '讀取 a.ts', 'unfinished'),
+    tool(118_000, '搜尋 ConfigPaths', 'running'),
+  ], dropped: 0 }, options)
+  expect(texts(rows).slice(0, 6)).toEqual([
+    '+0:04 ✓ 讀取 config.ghostty',
+    '+0:12 ✗ 讀取 GhosttyConfig.swift',
+    '        File does not exist',
+    '+0:13 ⊘ 執行：rm -rf /',
+    '        不允許',
+    '+0:14 · 讀取 a.ts',
+  ])
+  // 右邊是已經跑了多久（跟卡片的耗時一樣，不加 +）
+  expect(texts(rows)[6]).toMatch(/^\+1:58 … 搜尋 ConfigPaths +0:04$/)
+  expect(displayWidth(texts(rows)[6]!)).toBe(40)
+  expect(rows[0]!.find(span => span.text === '✓')).toMatchObject({ color: 'success' })
+  expect(rows[1]!.find(span => span.text === '✗')).toMatchObject({ color: 'error' })
+  expect(rows[2]!.at(-1)).toMatchObject({ color: 'error' })
+  expect(rows[3]!.find(span => span.text === '⊘')).toMatchObject({ color: 'warning' })
+  expect(rows[5]!.every(span => span.isDim)).toBe(true)
+  expect(rows[0]![0]).toMatchObject({ isDim: true })
+})
+
+test('時間欄依最寬的對齊', () => {
+  const rows = detailRows({ entries: [tool(4000, '讀取 a', 'ok'), tool(754_000, '讀取 b', 'ok')], dropped: 0 }, { ...options, now: 760_000 })
+  expect(texts(rows)).toEqual(['+0:04  ✓ 讀取 a', '+12:34 ✓ 讀取 b'])
+})
+
+test('中途訊息最多 3 列、結尾 …」，續行對齊；短訊息一列；換行合成空白', () => {
+  const long = detailRows({ entries: [{ kind: 'message', at: 10_000, text: '找到 4 個 cmux 自有鍵，'.repeat(10) }], dropped: 0 }, { ...options, columns: 30 })
+  const lines = texts(long)
+  expect(lines).toHaveLength(3)
+  expect(lines[0]!.startsWith('+0:10 「')).toBe(true)
+  expect(lines[1]!.startsWith('      ')).toBe(true)
+  expect(lines[2]!.endsWith('…」')).toBe(true)
+  for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(30)
+  expect(texts(detailRows({ entries: [{ kind: 'message', at: 10_000, text: '找到\n4 個鍵' }], dropped: 0 }, options))).toEqual(['+0:10 「找到 4 個鍵」'])
+})
+
+test('回報：標題列加粗，全文完整換行並保留空行', () => {
+  const report = '第一段' + '很長'.repeat(30) + '\n\n第二段'
+  const rows = detailRows({ entries: [{ kind: 'report', at: 123_000, text: report }], dropped: 0 }, options)
+  expect(texts(rows)[0]).toBe('+2:03 回報')
+  expect(rows[0]!.find(span => span.text === '回報')).toMatchObject({ isBold: true })
+  const body = texts(rows).slice(1)
+  expect(body.every(line => line === '' || line.startsWith('      '))).toBe(true)
+  expect(body.map(line => line.trim()).join('')).toBe(report.replace(/\n/g, ''))
+  expect(body.some(line => line.trim() === '')).toBe(true)
+})
+
+test('沒有空白的長字串依寬度硬切，不超出面板', () => {
+  const url = 'https://example.com/' + 'a'.repeat(280)
+  const rows = detailRows({ entries: [{ kind: 'report', at: 0, text: url }, { kind: 'message', at: 0, text: url }], dropped: 0 }, { ...options, columns: 30 })
+  for (const line of texts(rows)) expect(displayWidth(line)).toBeLessThanOrEqual(30)
+})
+
+test('換行快取不影響結果：同一段紀錄換寬度再換回來，結果一致', () => {
+  const log = { entries: [{ kind: 'report', at: 0, text: '很長的回報'.repeat(40) }] as LogEntry[], dropped: 0 }
+  const first = detailRows(log, { ...options, columns: 30 })
+  expect(detailRows(log, options)).not.toEqual(first)
+  expect(detailRows(log, { ...options, columns: 30 })).toEqual(first)
+})
+
+test('已省略提示與沒有紀錄的提示', () => {
+  expect(texts(detailRows({ entries: [tool(0, '讀取 a', 'ok')], dropped: 3 }, options))[0]).toBe('更早的 3 筆已省略')
+  expect(detailRows({ entries: [], dropped: 0 }, options)).toEqual([[{ text: 'mod 載入前的紀錄沒有保留', isDim: true }]])
+})
+
+test('wrapToWidth：中文 2 欄、分段', () => {
+  expect(wrapToWidth('中文字', 4)).toEqual(['中文', '字'])
+  expect(wrapToWidth('ab\n\ncd', 10)).toEqual(['ab', '', 'cd'])
+})
