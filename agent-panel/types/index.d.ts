@@ -42,6 +42,31 @@ export type AgentRow = {
 // 這一回合派出的子代理
 export type Batch = { turnId: string; agents: AgentRow[] }
 
+// 工具呼叫的狀態；unfinished 是子代理結束時結果還沒回來（中斷、失敗、熱重載）
+export type ToolOutcome = 'running' | 'ok' | 'error' | 'denied' | 'unfinished'
+
+// 詳細頁的一筆紀錄
+export type LogEntry =
+  | {
+      kind: 'tool'
+      // tool_use_id，沒有就由 hook 產生
+      id: string
+      at: number
+      // describeTool 產生的一行摘要，跟卡片上「正在做什麼」一致
+      summary: string
+      outcome: ToolOutcome
+      // 出錯或被拒絕時的第一行，其他為 null
+      errorLine: string | null
+    }
+  | { kind: 'message'; at: number; text: string }
+  | { kind: 'report'; at: number; text: string }
+
+// dropped：超過上限時從最舊的丟掉了幾筆
+export type AgentLog = { entries: LogEntry[]; dropped: number }
+
+// turnId 跟 batch 的不同就是舊資料，下一次寫入直接換掉
+export type Logs = { turnId: string; byAgent: Record<string, AgentLog> }
+
 declare module 'claude-code' {
   interface PluginState {
     'agent-panel': {
@@ -49,6 +74,10 @@ declare module 'claude-code' {
       batch: Batch | null
       // 動畫計數器，只有面板讀
       tick: number
+      // 這一批每個子代理的紀錄，只有詳細頁讀
+      logs: Logs | null
+      // 目前打開詳細頁的 agentId
+      selected: string | null
     }
   }
 }

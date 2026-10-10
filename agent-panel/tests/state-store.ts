@@ -4,10 +4,15 @@ export function stateStore(on: any, initial: Record<string, unknown> = {}) {
   const held = new Map<string, { value: unknown; version: number }>()
   // mod 經 state.set 寫入成功的次數；每次寫入都會讓讀這個值的面板重畫
   const writeCounts = new Map<string, number>()
+  // mod 經 state.get 讀取的次數；用來確認清單畫面不讀 logs
+  const readCounts = new Map<string, number>()
   for (const [key, value] of Object.entries(initial)) held.set(key, { value, version: 1 })
-  for (const key of ['batch', 'tick']) {
+  for (const key of ['batch', 'tick', 'logs', 'selected']) {
     const ref = { plugin: 'agent-panel', key }
-    on('state.get', ref, () => ({ value: { value: held.get(key)?.value, version: held.get(key)?.version ?? 0 } }))
+    on('state.get', ref, () => {
+      readCounts.set(key, (readCounts.get(key) ?? 0) + 1)
+      return { value: { value: held.get(key)?.value, version: held.get(key)?.version ?? 0 } }
+    })
     on('state.set', ref, (_$: any, e: any) => {
       const version = held.get(key)?.version ?? 0
       if (e.ifVersion !== undefined && e.ifVersion !== version) return { value: { isSet: false, version } }
@@ -22,5 +27,6 @@ export function stateStore(on: any, initial: Record<string, unknown> = {}) {
     // 模擬狀態被直接改掉（不經過 mod 的事件），版本照樣往上加
     set: (key: string, value: unknown) => held.set(key, { value, version: (held.get(key)?.version ?? 0) + 1 }),
     writes: (key: string) => writeCounts.get(key) ?? 0,
+    reads: (key: string) => readCounts.get(key) ?? 0,
   }
 }
