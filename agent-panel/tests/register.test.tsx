@@ -21,7 +21,19 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
     batchAtStep: null as any,
     // 代替 host 的窗格清單：開了就列出，關了就移除
     panes: [] as { id: string; title: string; isShown: boolean; isFocused: boolean; isPlaced: boolean }[],
-    clock: mock.clock(on),
+    // mock.clock 透過 on 註冊 clock.now 的回答：包一層數 mod 問了幾次時間
+    clock: mock.clock((event: string, ...rest: any[]) => {
+      if (event === 'clock.now') {
+        const answer = rest[rest.length - 1]
+        rest[rest.length - 1] = (...args: any[]) => {
+          control.clockReads++
+          return answer(...args)
+        }
+      }
+      return on(event, ...rest)
+    }),
+    // mod 經 $.clock.now() 問時間的次數
+    clockReads: 0,
     // tool.call（Agent 以外）依序回的結果，排完了回成功
     toolReplies: [] as object[],
     // 主迴圈 Agent 工具回的結果：前景子代理帶 Claude Code 算的總計，背景子代理沒有
@@ -993,4 +1005,15 @@ test('最後開始的同步失敗時再試一次：比它早、讓位給它的�
   hold.release()
   await finishing
   expect(control.statuses.at(-1)).toBe('Agents ●1 ✓1')
+})
+
+test('不在這一批的 fork 呼叫工具時不問時間（也不算摘要）；這一批的子代理照常問', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  const before = control.clockReads
+  await $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'fork-1', tool_use_id: 'f1' } as any)
+  expect(control.clockReads - before).toBe(0)
+  await $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'r1' } as any)
+  expect(control.clockReads - before).toBeGreaterThan(0)
 })

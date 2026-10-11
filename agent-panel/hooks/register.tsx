@@ -188,8 +188,8 @@ function isOwnMessage(originKind: string, text: string) {
   return (originKind === 'composer' || originKind === 'bridge') && !text.trimStart().startsWith('/')
 }
 
-// Claude Code 自己的內部 fork（例如 compaction）也帶 agentId，但不在這一批；詳細頁的紀錄只記這一批的子代理，寫 logs 前先確認。
-// 批次本身的寫入不用它：用 updateBatchIfChanged，更新函式找不到這個子代理時回傳原物件，就不寫
+// Claude Code 自己的內部 fork（例如 compaction）也帶 agentId，但不在這一批：寫 logs 前、或要先確認才做的事（工具呼叫的摘要與時間）
+// 用它確認。只寫批次的地方不用它：用 updateBatchIfChanged，更新函式找不到這個子代理時回傳原物件，就不寫
 async function isInBatch($: EngineInterface, agentId: string) {
   const batch = await read($, batchAtom)
   return batch !== null && batch.agents.some(agent => agent.id === agentId)
@@ -206,22 +206,16 @@ async function updateLogsIfChanged($: EngineInterface, change: (logs: Logs | nul
 }
 
 // 回傳寫入後的批次（update 會回傳它寫入的值）；沒有變化、沒寫時回傳 undefined。
-// 記錄子代理的更新函式找不到這個子代理時回傳原物件，所以 undefined 也代表它不在這一批。
-// alongside：確定要寫入後、跟寫入平行進行的工作（例如詳細頁的紀錄）；兩邊都做完才回傳，它出錯不影響批次的寫入
-async function updateBatchIfChanged(
-  $: EngineInterface,
-  change: (batch: Batch | null) => Batch | null,
-  alongside?: () => Promise<unknown>,
-): Promise<Batch | null | undefined> {
+// 記錄子代理的更新函式找不到這個子代理時回傳原物件，所以 undefined 也代表它不在這一批
+async function updateBatchIfChanged($: EngineInterface, change: (batch: Batch | null) => Batch | null): Promise<Batch | null | undefined> {
   const current = await read($, batchAtom)
   if (change(current) === current) return undefined
-  const [written] = await Promise.allSettled([update($, batchAtom, change), alongside?.()])
-  if (written.status === 'rejected') throw written.reason
-  return written.value
+  return update($, batchAtom, change)
 }
 
 // 包住新增紀錄的更新函式：開始記錄（clearsAtStart）之後 /clear 過就原樣回傳，不重建已清掉的紀錄。
-// 只讀模組變數、沒有副作用，…IfChanged 跑兩次也沒關係
+// 外層是一律寫入的 update 時，仍會把同一個（空的）值寫一次、多重畫一次；工具開始也照樣算成記下了，結束時再寫一次空的。
+// 只有跨過 /clear 的寫入才會這樣，沒有改用先讀再寫，免得每次都多讀一次。只讀模組變數、沒有副作用，…IfChanged 跑兩次也沒關係
 function unlessClearedSince(clearsAtStart: number, change: (logs: Logs | null) => Logs | null) {
   return (logs: Logs | null) => (clearCount === clearsAtStart ? change(logs) : logs)
 }
@@ -271,17 +265,17 @@ async function recordStepUsage($: EngineInterface, agentId: string, step: { mode
   }
 }
 
-// 卡片顯示子代理目前在做什麼；確定在這一批之後，詳細頁的紀錄（writeLog）跟寫入卡片平行進行，兩邊用同一份摘要與時間。
-// 不在這一批（Claude Code 的內部 fork）時兩邊都不寫；寫卡片失敗時紀錄照樣寫
+// 卡片顯示子代理目前在做什麼；確定在這一批之後才算摘要、問時間，寫卡片與詳細頁的紀錄（writeLog）平行進行，兩邊用同一份摘要與時間。
+// 不在這一批（Claude Code 的內部 fork）時什麼都不做；寫卡片失敗時紀錄照樣寫
 async function recordTool($: EngineInterface, agentId: string, call: ToolCallInput, writeLog: (start: ToolStart) => Promise<void>) {
   try {
+    if (!(await isInBatch($, agentId))) return
     const start: ToolStart = { summary: describeTool(call.tool, call), at: await $.clock.now() }
-    const written = await updateBatchIfChanged(
-      $,
-      batch => (batch === null ? batch : recordToolCall(batch, agentId, start.summary, start.at)),
-      () => writeLog(start),
-    )
-    if (written === undefined) return
+    const [card] = await Promise.allSettled([
+      update($, batchAtom, batch => (batch === null ? batch : recordToolCall(batch, agentId, start.summary, start.at))),
+      writeLog(start),
+    ])
+    if (card.status === 'rejected') return
     // 面板可能先在背景等待、終端機拉寬後才放上畫面，或被使用者按 ✕ 關掉，這些都沒有事件通知；
     // 趁工具呼叫補啟動動畫，或補上輸入框下方的狀態列。同步時重新讀批次：寫紀錄期間別的子代理可能已經結束，
     // 甚至這個子代理自己被中斷而結束，沿用剛寫入的批次會把狀態列蓋回執行中
@@ -474,7 +468,7 @@ export const register: Register = on => {
       // 在這之後開始的，確認子代理時批次已經是空的，本來就不會寫。先記下的話，記下到清空批次之間開始的寫入兩邊都擋不到
       clearCount++
       // 紀錄一律寫成空的、不先讀再決定：進行中的寫入可能在讀之後才寫進去；一定寫的話兩邊會撞版本，
-      // 重試的那一方發現已經 /clear 過就不寫，最後一定是空的
+      // 重試的那一方發現已經 /clear 過，就把空的原樣寫回（unlessClearedSince），最後一定是空的
       await update($, logsAtom, () => null).catch(() => {})
       agentsWithReport.clear()
       await showList($)
