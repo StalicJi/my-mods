@@ -52,6 +52,11 @@ const batchAtom = atom({ plugin: 'agent-panel', key: 'batch' } as const, null as
 const tickAtom = atom({ plugin: 'agent-panel', key: 'tick' } as const, 0)
 // 詳細頁的紀錄；清單不讀它，新增紀錄不會讓清單重畫
 const logsAtom = atom({ plugin: 'agent-panel', key: 'logs' } as const, null as Logs | null)
+// 沒有變化就不寫的寫入（writeIfChanged）直接用 $.state.get／set：plugin 與 key 要是原始碼裡的字面值，host 才掃得到
+const BATCH_REF = { plugin: 'agent-panel', key: 'batch' } as const
+const LOGS_REF = { plugin: 'agent-panel', key: 'logs' } as const
+// writeIfChanged 被別人搶先寫入時最多試幾次，跟 update 一樣
+const WRITE_ATTEMPTS = 64
 // 目前打開詳細頁的 agentId
 const selectedAtom = atom({ plugin: 'agent-panel', key: 'selected' } as const, null as string | null)
 
@@ -72,9 +77,6 @@ let shownStatus: string | undefined | typeof STATUS_UNKNOWN = STATUS_UNKNOWN
 let forcesTerminalImages = false
 // 工具呼叫沒有 tool_use_id 時，用它產生紀錄 id
 let toolSequence = 0
-// 交回過（或正在交回）報告的子代理：最後的回覆常跟報告相同（不重複記、不寫），只有它們的回覆要先讀 logs 確認有沒有變化；
-// 其他子代理的回覆一定會新增一筆，直接寫。寫報告前就加進來，寫失敗頂多多讀一次；熱重載後清空，最多多寫一次
-const agentsWithReport = new Set<string>()
 // 同步狀態列與動畫的序號：只套用最後開始的那次同步。幾個子代理幾乎同時結束時，較早開始的同步可能讀到
 // 還有子代理在跑的批次，若它較晚完成又照樣套用，狀態列與動畫會停在執行中；改變執行狀態的寫入（派出、結束）
 // 之後都會同步，最後開始的那次讀到的是所有寫入之後的批次
@@ -87,6 +89,11 @@ type SpawnFacts = { id: string; description: string; agentType: string; agentNam
 type FinishReason = 'answer' | 'aborted' | 'error' | 'refusal'
 // 一次工具呼叫的摘要與開始時間：卡片和詳細頁的紀錄共用同一份
 type ToolStart = { summary: string; at: number }
+// 一個 state 值的讀與帶版本的寫：writeIfChanged 用它比對後才寫
+type StateSlot<T> = {
+  read: () => Promise<{ value: T; version: number }>
+  write: (value: T, version: number) => Promise<{ isSet: boolean }>
+}
 
 // mod 自己開的窗格要終端機夠寬才放得下（使用者親手開過後門檻較低）；放不下時窗格在背景等，提示一次怎麼開
 export async function openPanel($: EngineInterface): Promise<void> {
@@ -195,27 +202,50 @@ async function isInBatch($: EngineInterface, agentId: string) {
   return batch !== null && batch.agents.some(agent => agent.id === agentId)
 }
 
-// 更新函式回傳原物件代表沒有變化：先用目前的值算一次，沒變就不寫，免得面板白白重畫；
-// 有變才交給 update，讀完到寫入之間被改過的話它會用最新的值重算。
-// 更新函式因此至少會跑兩次，必須是純函式：不能在裡面設外部變數（像 recordSpawn 的 isNewBatch）或有其他副作用。
-// atom 只能直接放在 read／update 的第一個參數（host 靠它掃出讀寫哪些 state），所以 logs 與 batch 各一個
-async function updateLogsIfChanged($: EngineInterface, change: (logs: Logs | null) => Logs | null) {
-  const current = await read($, logsAtom)
-  if (change(current) === current) return
-  await update($, logsAtom, change)
+// update 拿回同一個值也照寫一次（讀它的畫面白白重畫），所以自己做 update 的那一圈，多一個比對：
+// 讀到值與版本、算新值，更新函式回傳原物件代表沒有變化就不寫；有變化才帶著讀到的版本寫入，
+// 被別人搶先（版本不符）就重讀重算。每次只讀一次。更新函式搶輸時會再跑，必須是純函式：
+// 不能在裡面設外部變數（像 recordSpawn 的 isNewBatch）或有其他副作用。回傳有沒有寫入
+async function writeIfChanged<T>(slot: StateSlot<T>, change: (value: T) => T): Promise<boolean> {
+  for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
+    const { value, version } = await slot.read()
+    const next = change(value)
+    if (next === value) return false
+    if ((await slot.write(next, version)).isSet) return true
+  }
+  throw new Error('writeIfChanged: 每次讀到之後都被別人搶先寫入，試到上限仍沒寫進去')
 }
 
-// 回傳有沒有寫入：更新函式回傳原物件（沒有變化，例如子代理不在這一批）時不寫
-async function updateBatchIfChanged($: EngineInterface, change: (batch: Batch | null) => Batch | null): Promise<boolean> {
-  const current = await read($, batchAtom)
-  if (change(current) === current) return false
-  await update($, batchAtom, change)
-  return true
+// 詳細頁的紀錄：沒有變化就不寫，回傳有沒有寫入
+function updateLogsIfChanged($: EngineInterface, change: (logs: Logs | null) => Logs | null): Promise<boolean> {
+  return writeIfChanged(
+    {
+      read: async () => {
+        const held = await $.state.get(LOGS_REF)
+        return { value: held.value ?? null, version: held.version }
+      },
+      write: (value, version) => $.state.set(LOGS_REF, value, { ifVersion: version }),
+    },
+    change,
+  )
 }
 
-// 包住新增紀錄的更新函式：開始記錄（clearsAtStart）之後 /clear 過就原樣回傳，不重建已清掉的紀錄。
-// 外層是一律寫入的 update 時，仍會把同一個（空的）值寫一次、多重畫一次；工具開始也照樣算成記下了，結束時再寫一次空的。
-// 只有跨過 /clear 的寫入才會這樣，沒有改用先讀再寫，免得每次都多讀一次。只讀模組變數、沒有副作用，…IfChanged 跑兩次也沒關係
+// 批次：沒有變化（例如子代理不在這一批）就不寫，回傳有沒有寫入
+function updateBatchIfChanged($: EngineInterface, change: (batch: Batch | null) => Batch | null): Promise<boolean> {
+  return writeIfChanged(
+    {
+      read: async () => {
+        const held = await $.state.get(BATCH_REF)
+        return { value: held.value ?? null, version: held.version }
+      },
+      write: (value, version) => $.state.set(BATCH_REF, value, { ifVersion: version }),
+    },
+    change,
+  )
+}
+
+// 包住新增紀錄的更新函式：開始記錄（clearsAtStart）之後 /clear 過就原樣回傳，updateLogsIfChanged 就不寫，不重建已清掉的紀錄。
+// 只讀模組變數、沒有副作用，搶輸時重跑也沒關係
 function unlessClearedSince(clearsAtStart: number, change: (logs: Logs | null) => Logs | null) {
   return (logs: Logs | null) => (clearCount === clearsAtStart ? change(logs) : logs)
 }
@@ -290,8 +320,8 @@ async function recordToolStart($: EngineInterface, agentId: string, call: ToolCa
   const id = call.tool_use_id ?? `${agentId}-${++toolSequence}`
   const clearsAtStart = clearCount
   return recordTool($, agentId, call, async start => {
-    await update($, logsAtom, unlessClearedSince(clearsAtStart, logs => addToolStart(logs, agentId, { id, ...start })))
-    return id
+    const isWritten = await updateLogsIfChanged($, unlessClearedSince(clearsAtStart, logs => addToolStart(logs, agentId, { id, ...start })))
+    return isWritten ? id : null
   })
 }
 
@@ -301,9 +331,7 @@ async function recordHandback($: EngineInterface, agentId: string, call: ToolCal
   const clearsAtStart = clearCount
   await recordTool($, agentId, call, async start => {
     if (text === null) return
-    // 先標記再寫：寫進去之後才標記的話，同一步的回覆可能剛好落在中間，跟報告重複卻照樣寫一次
-    agentsWithReport.add(agentId)
-    await update($, logsAtom, unlessClearedSince(clearsAtStart, logs => addReport(logs, agentId, { at: start.at, text })))
+    await updateLogsIfChanged($, unlessClearedSince(clearsAtStart, logs => addReport(logs, agentId, { at: start.at, text })))
   })
 }
 
@@ -332,24 +360,22 @@ async function recordFinish($: EngineInterface, agentId: string, reason: FinishR
 }
 
 // 只在 recordToolStart 記下紀錄後呼叫，所以不再讀批次：執行中的子代理換批次時會被帶到新的一批，紀錄不會在工具跑到一半時被刪掉。
-// 結果回來時那一筆幾乎一定還在（只有工具執行期間又多出 100 筆、或被 /clear 清掉才找不到），所以不先讀 logs 確認有沒有變
+// 找不到那一筆（工具執行期間又多出 100 筆、或被 /clear 清掉）時 finishTool 回傳原物件，就不寫
 async function recordToolEnd($: EngineInterface, agentId: string, toolId: string, result: unknown) {
   try {
-    await update($, logsAtom, logs => finishTool(logs, agentId, toolId, toolEndOf(result)))
+    await updateLogsIfChanged($, logs => finishTool(logs, agentId, toolId, toolEndOf(result)))
   } catch {
     // 略過
   }
 }
 
 // answer.at 是這一步開始的時間：工具可能在回應串流時就先執行，訊息要排在它們前面。
-// 交回過報告的子代理，這段話可能跟報告相同而沒有變化，才先讀 logs 確認；其他直接寫，每步只讀一次 logs
+// 跟同一步已經交回的報告相同時 addAnswer 回傳原物件，就不寫
 async function recordAnswer($: EngineInterface, agentId: string, answer: { at: number; text: string; isFinal: boolean }) {
   try {
     const clearsAtStart = clearCount
     if (!(await isInBatch($, agentId))) return
-    const change = unlessClearedSince(clearsAtStart, logs => addAnswer(logs, agentId, answer))
-    if (agentsWithReport.has(agentId)) await updateLogsIfChanged($, change)
-    else await update($, logsAtom, change)
+    await updateLogsIfChanged($, unlessClearedSince(clearsAtStart, logs => addAnswer(logs, agentId, answer)))
   } catch {
     // 略過
   }
@@ -467,9 +493,8 @@ export const register: Register = on => {
       // 在這之後開始的，確認子代理時批次已經是空的，本來就不會寫。先記下的話，記下到清空批次之間開始的寫入兩邊都擋不到
       clearCount++
       // 紀錄一律寫成空的、不先讀再決定：進行中的寫入可能在讀之後才寫進去；一定寫的話兩邊會撞版本，
-      // 重試的那一方發現已經 /clear 過，就把空的原樣寫回（unlessClearedSince），最後一定是空的
+      // 重試的那一方發現已經 /clear 過就原樣回傳（unlessClearedSince）而不寫，最後一定是空的
       await update($, logsAtom, () => null).catch(() => {})
-      agentsWithReport.clear()
       await showList($)
     }
     return next(e)
@@ -568,8 +593,6 @@ export const register: Register = on => {
     if (e.agentId !== undefined) {
       await recordFinish($, e.agentId, e.reason)
       await recordUnfinished($, e.agentId)
-      // 結束後不會再有回覆
-      agentsWithReport.delete(e.agentId)
     }
     return next(e)
   })

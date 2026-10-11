@@ -799,14 +799,14 @@ test('/clear 時批次與 selected 已經是空的就不寫；紀錄一律寫成
   expect(['batch', 'logs', 'selected'].map(key => control.state.writes(key))).toEqual([0, 1, 0])
 })
 
-// 結束時同步狀態列重新讀批次（幾個子代理同時結束時，最後開始的同步要讀到所有寫入之後的批次），所以是 3 次
-test('子代理結束時讀 3 次批次（確認在這一批、寫入、同步狀態列重新讀），標未完成的工具不讀；不在這一批的 fork 結束時不寫紀錄', async ($, on) => {
+// 確認在這一批並寫入只讀一次（writeIfChanged）；同步狀態列重新讀一次（幾個子代理同時結束時，最後開始的同步要讀到所有寫入之後的批次）
+test('子代理結束時讀 2 次批次（確認在這一批並寫入、同步狀態列重新讀），標未完成的工具不讀；不在這一批的 fork 結束時不寫紀錄', async ($, on) => {
   const control = engine(on)
   await start($)
   await spawnAgent($)
   const before = control.state.reads('batch')
   await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1, agentId: 'a1', turnId: 'x' } as any)
-  expect(control.state.reads('batch') - before).toBe(3)
+  expect(control.state.reads('batch') - before).toBe(2)
   const writesBefore = control.state.writes('logs')
   await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1, agentId: 'fork-1', turnId: 'y' } as any)
   expect(control.state.writes('logs')).toBe(writesBefore)
@@ -1033,4 +1033,41 @@ test('交回報告的紀錄已經寫進去、交回那邊還沒往下走時，�
   hold.release()
   await handingBack
   expect(control.state.get('logs').byAgent.a1.entries.map((entry: any) => entry.kind)).toEqual(['report'])
+})
+
+test('交回過報告的子代理，之後一步有新的回覆時只讀 1 次 logs', async ($, on) => {
+  const control = engine(on)
+  control.stepReplies.push({ answer: '補充一句', toolUses: [{ id: 'u', name: 'Read', input: {} }], stopReason: 'tool_use' })
+  await start($)
+  await spawnAgent($)
+  await $.tool.call({ tool: 'SubagentHandback', message: '報告內容', agentId: 'a1' } as any)
+  await control.clock.advance(1000)
+  const before = control.state.reads('logs')
+  await step($, 'a1')
+  expect(control.state.reads('logs') - before).toBe(1)
+  expect(control.state.get('logs').byAgent.a1.entries.map((entry: any) => entry.kind)).toEqual(['report', 'message'])
+})
+
+test('子代理的一步（沒有文字回覆）只讀 2 次批次：開始思考、記用量各 1 次', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  const before = control.state.reads('batch')
+  await step($, 'a1')
+  expect(control.state.reads('batch') - before).toBe(2)
+})
+
+test('跨過 /clear 的工具開始紀錄不寫：不重建，也不把空的再寫一次', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  const hold = control.state.holdNext('get:logs')
+  const calling = $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'r1' } as any)
+  await hold.whenReached
+  await $.session.end({ reason: 'clear' } as any)
+  const before = control.state.writes('logs')
+  hold.release()
+  await calling
+  expect(control.state.writes('logs') - before).toBe(0)
+  expect(control.state.get('logs')).toBeNull()
 })
