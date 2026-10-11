@@ -1071,3 +1071,27 @@ test('跨過 /clear 的工具開始紀錄不寫：不重建，也不把空的再
   expect(control.state.writes('logs') - before).toBe(0)
   expect(control.state.get('logs')).toBeNull()
 })
+
+test('logs 寫入被拒時只試一次、不重試，工具照樣執行並回傳結果', async ($, on) => {
+  const control = engine(on)
+  control.toolReplies.push({ result: {}, text: '讀到了' })
+  await start($)
+  await spawnAgent($)
+  control.state.failWrites('logs')
+  const from = control.state.operations().length
+  const result = await $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'r1' } as any)
+  const operations = control.state.operations().slice(from)
+  expect(operations.filter(operation => operation === 'set:logs')).toHaveLength(1)
+  expect(result).toMatchObject({ text: '讀到了' })
+})
+
+test('batch 寫入被拒時只試一次、不重試，子代理照樣結束', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  control.state.failWrites('batch')
+  const from = control.state.operations().length
+  await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1, agentId: 'a1', turnId: 'x' } as any)
+  const operations = control.state.operations().slice(from)
+  expect(operations.filter(operation => operation === 'set:batch')).toHaveLength(1)
+})
