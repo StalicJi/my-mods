@@ -53,6 +53,7 @@ export function stateStore(on: any, initial: Record<string, unknown> = {}) {
       if (e.ifVersion !== undefined && e.ifVersion !== version) return { value: { isSet: false, version } }
       held.set(key, { value: e.value, version: version + 1 })
       writeCounts.set(key, (writeCounts.get(key) ?? 0) + 1)
+      await waitIfHeld(`after:set:${key}`)
       return { value: { isSet: true, version: version + 1 } }
     })
   }
@@ -65,7 +66,7 @@ export function stateStore(on: any, initial: Record<string, unknown> = {}) {
     reads: (key: string) => readCounts.get(key) ?? 0,
     operations: () => [...operations],
     failWrites: (key: string) => failingKeys.add(key),
-    // 讓下一次 get:key 或 set:key 停住（讀到的是放行當下的值）
+    // 讓下一次 get:key 或 set:key 停住（讀到的是放行當下的值）；after:set:key 是寫進去之後、回答 mod 之前停住
     holdNext(operation: string): Hold {
       const hold = createHold()
       holds.set(operation, hold)

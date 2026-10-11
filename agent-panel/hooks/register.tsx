@@ -72,8 +72,8 @@ let shownStatus: string | undefined | typeof STATUS_UNKNOWN = STATUS_UNKNOWN
 let forcesTerminalImages = false
 // 工具呼叫沒有 tool_use_id 時，用它產生紀錄 id
 let toolSequence = 0
-// 交回過報告的子代理：最後的回覆常跟報告相同（不重複記、不寫），只有它們的回覆要先讀 logs 確認有沒有變化；
-// 其他子代理的回覆一定會新增一筆，直接寫。熱重載後清空，最多多寫一次
+// 交回過（或正在交回）報告的子代理：最後的回覆常跟報告相同（不重複記、不寫），只有它們的回覆要先讀 logs 確認有沒有變化；
+// 其他子代理的回覆一定會新增一筆，直接寫。寫報告前就加進來，寫失敗頂多多讀一次；熱重載後清空，最多多寫一次
 const agentsWithReport = new Set<string>()
 // 同步狀態列與動畫的序號：只套用最後開始的那次同步。幾個子代理幾乎同時結束時，較早開始的同步可能讀到
 // 還有子代理在跑的批次，若它較晚完成又照樣套用，狀態列與動畫會停在執行中；改變執行狀態的寫入（派出、結束）
@@ -205,12 +205,12 @@ async function updateLogsIfChanged($: EngineInterface, change: (logs: Logs | nul
   await update($, logsAtom, change)
 }
 
-// 回傳寫入後的批次（update 會回傳它寫入的值）；沒有變化、沒寫時回傳 undefined。
-// 記錄子代理的更新函式找不到這個子代理時回傳原物件，所以 undefined 也代表它不在這一批
-async function updateBatchIfChanged($: EngineInterface, change: (batch: Batch | null) => Batch | null): Promise<Batch | null | undefined> {
+// 回傳有沒有寫入：更新函式回傳原物件（沒有變化，例如子代理不在這一批）時不寫
+async function updateBatchIfChanged($: EngineInterface, change: (batch: Batch | null) => Batch | null): Promise<boolean> {
   const current = await read($, batchAtom)
-  if (change(current) === current) return undefined
-  return update($, batchAtom, change)
+  if (change(current) === current) return false
+  await update($, batchAtom, change)
+  return true
 }
 
 // 包住新增紀錄的更新函式：開始記錄（clearsAtStart）之後 /clear 過就原樣回傳，不重建已清掉的紀錄。
@@ -266,22 +266,22 @@ async function recordStepUsage($: EngineInterface, agentId: string, step: { mode
 }
 
 // 卡片顯示子代理目前在做什麼；確定在這一批之後才算摘要、問時間，寫卡片與詳細頁的紀錄（writeLog）平行進行，兩邊用同一份摘要與時間。
-// 不在這一批（Claude Code 的內部 fork）時什麼都不做；寫卡片失敗時紀錄照樣寫
-async function recordTool($: EngineInterface, agentId: string, call: ToolCallInput, writeLog: (start: ToolStart) => Promise<void>) {
+// 回傳 writeLog 的結果；不在這一批（Claude Code 的內部 fork）時什麼都不做，跟紀錄寫入失敗一樣回傳 null。寫卡片失敗時紀錄照樣寫
+async function recordTool<T>($: EngineInterface, agentId: string, call: ToolCallInput, writeLog: (start: ToolStart) => Promise<T>): Promise<T | null> {
   try {
-    if (!(await isInBatch($, agentId))) return
+    if (!(await isInBatch($, agentId))) return null
     const start: ToolStart = { summary: describeTool(call.tool, call), at: await $.clock.now() }
-    const [card] = await Promise.allSettled([
+    const [card, log] = await Promise.allSettled([
       update($, batchAtom, batch => (batch === null ? batch : recordToolCall(batch, agentId, start.summary, start.at))),
       writeLog(start),
     ])
-    if (card.status === 'rejected') return
     // 面板可能先在背景等待、終端機拉寬後才放上畫面，或被使用者按 ✕ 關掉，這些都沒有事件通知；
     // 趁工具呼叫補啟動動畫，或補上輸入框下方的狀態列。同步時重新讀批次：寫紀錄期間別的子代理可能已經結束，
     // 甚至這個子代理自己被中斷而結束，沿用剛寫入的批次會把狀態列蓋回執行中
-    if (timer === undefined) await syncTimerAndStatus($)
+    if (card.status === 'fulfilled' && timer === undefined) await syncTimerAndStatus($)
+    return log.status === 'fulfilled' ? log.value : null
   } catch {
-    // 略過
+    return null
   }
 }
 
@@ -289,12 +289,10 @@ async function recordTool($: EngineInterface, agentId: string, call: ToolCallInp
 async function recordToolStart($: EngineInterface, agentId: string, call: ToolCallInput): Promise<string | null> {
   const id = call.tool_use_id ?? `${agentId}-${++toolSequence}`
   const clearsAtStart = clearCount
-  let isLogged = false
-  await recordTool($, agentId, call, async start => {
+  return recordTool($, agentId, call, async start => {
     await update($, logsAtom, unlessClearedSince(clearsAtStart, logs => addToolStart(logs, agentId, { id, ...start })))
-    isLogged = true
+    return id
   })
-  return isLogged ? id : null
 }
 
 // 交回報告：卡片照樣算一次工具，詳細頁記成回報，不另外記成一筆工具
@@ -303,8 +301,9 @@ async function recordHandback($: EngineInterface, agentId: string, call: ToolCal
   const clearsAtStart = clearCount
   await recordTool($, agentId, call, async start => {
     if (text === null) return
-    await update($, logsAtom, unlessClearedSince(clearsAtStart, logs => addReport(logs, agentId, { at: start.at, text })))
+    // 先標記再寫：寫進去之後才標記的話，同一步的回覆可能剛好落在中間，跟報告重複卻照樣寫一次
     agentsWithReport.add(agentId)
+    await update($, logsAtom, unlessClearedSince(clearsAtStart, logs => addReport(logs, agentId, { at: start.at, text })))
   })
 }
 
@@ -325,8 +324,8 @@ async function recordAgentResult($: EngineInterface, record: unknown) {
 async function recordFinish($: EngineInterface, agentId: string, reason: FinishReason) {
   try {
     const endedAt = await $.clock.now()
-    const written = await updateBatchIfChanged($, batch => (batch === null ? batch : finishAgent(batch, agentId, reason, endedAt)))
-    if (written !== undefined) await syncTimerAndStatus($)
+    const isWritten = await updateBatchIfChanged($, batch => (batch === null ? batch : finishAgent(batch, agentId, reason, endedAt)))
+    if (isWritten) await syncTimerAndStatus($)
   } catch {
     // 略過
   }

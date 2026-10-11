@@ -1017,3 +1017,20 @@ test('不在這一批的 fork 呼叫工具時不問時間（也不算摘要）�
   await $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'r1' } as any)
   expect(control.clockReads - before).toBeGreaterThan(0)
 })
+
+test('交回報告的紀錄已經寫進去、交回那邊還沒往下走時，同一步重複報告的回覆也不寫', async ($, on) => {
+  const control = engine(on)
+  control.stepReplies.push({ answer: '報告內容', toolUses: [{ id: 'u', name: 'SubagentHandback', input: {} }], stopReason: 'tool_use' })
+  await start($)
+  await spawnAgent($)
+  // 報告已經寫進 logs，交回報告那邊還沒拿到寫入的回答
+  const hold = control.state.holdNext('after:set:logs')
+  const handingBack = $.tool.call({ tool: 'SubagentHandback', message: '報告內容', agentId: 'a1' } as any)
+  await hold.whenReached
+  const before = control.state.writes('logs')
+  await step($, 'a1')
+  expect(control.state.writes('logs') - before).toBe(0)
+  hold.release()
+  await handingBack
+  expect(control.state.get('logs').byAgent.a1.entries.map((entry: any) => entry.kind)).toEqual(['report'])
+})
