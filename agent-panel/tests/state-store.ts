@@ -1,3 +1,21 @@
+// 讓一個非同步步驟先停住：被停住的那端呼叫 wait()，測試端 await whenReached 得知它停住了，release() 讓它繼續
+export function createHold() {
+  let arrive = () => {}
+  let release = () => {}
+  const whenReached = new Promise<void>(resolve => (arrive = resolve))
+  const released = new Promise<void>(resolve => (release = resolve))
+  return {
+    whenReached,
+    release,
+    async wait() {
+      arrive()
+      await released
+    },
+  }
+}
+
+export type Hold = ReturnType<typeof createHold>
+
 // 測試的 $ 沒有 state 名詞：代替 host 保存 agent-panel 的 state，照 ifVersion 檢查版本，
 // update 遇到版本衝突時才會重試，平行寫入的測試才有意義
 export function stateStore(on: any, initial: Record<string, unknown> = {}) {
@@ -11,13 +29,12 @@ export function stateStore(on: any, initial: Record<string, unknown> = {}) {
   // 寫入一律被拒絕的 key，模擬 host 寫入失敗
   const failingKeys = new Set<string>()
   // 下一次讀或寫要先停住的 key（get:key、set:key）：用來把別的事件插進 mod 的讀寫之間
-  const holds = new Map<string, { reached: () => void; released: Promise<void> }>()
+  const holds = new Map<string, Hold>()
   async function waitIfHeld(operation: string) {
     const hold = holds.get(operation)
     if (hold === undefined) return
     holds.delete(operation)
-    hold.reached()
-    await hold.released
+    await hold.wait()
   }
   for (const [key, value] of Object.entries(initial)) held.set(key, { value, version: 1 })
   for (const key of ['batch', 'tick', 'logs', 'selected']) {
@@ -48,14 +65,11 @@ export function stateStore(on: any, initial: Record<string, unknown> = {}) {
     reads: (key: string) => readCounts.get(key) ?? 0,
     operations: () => [...operations],
     failWrites: (key: string) => failingKeys.add(key),
-    // 讓下一次 get:key 或 set:key 停住；reached 在停住時完成，release() 讓它繼續（讀到的是放行當下的值）
-    holdNext(operation: string) {
-      let reached = () => {}
-      let release = () => {}
-      const isReached = new Promise<void>(resolve => (reached = resolve))
-      const released = new Promise<void>(resolve => (release = resolve))
-      holds.set(operation, { reached, released })
-      return { reached: isReached, release }
+    // 讓下一次 get:key 或 set:key 停住（讀到的是放行當下的值）
+    holdNext(operation: string): Hold {
+      const hold = createHold()
+      holds.set(operation, hold)
+      return hold
     },
   }
 }

@@ -1,7 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import { scrollToNewest } from '../hooks/register'
-import { stateStore } from './state-store'
+import { createHold, stateStore } from './state-store'
+import type { Hold } from './state-store'
 
 const USAGE = { input_tokens: 1000, output_tokens: 2000, cache_read_input_tokens: 10_000, cache_creation_input_tokens: 5000 }
 
@@ -31,7 +32,7 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
     // $.command.register 收到的參數
     registered: [] as any[],
     // 下一次 $.ui.panes 回答前先停住（見 holdNextPanes）
-    panesHold: null as null | { reached: () => void; released: Promise<void> },
+    panesHold: null as null | Hold,
     // 接下來幾次 $.ui.panes 回答失敗
     panesFailures: 0,
   }
@@ -41,8 +42,7 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
     const hold = control.panesHold
     if (hold !== null) {
       control.panesHold = null
-      hold.reached()
-      await hold.released
+      await hold.wait()
     }
     if (control.panesFailures > 0) {
       control.panesFailures--
@@ -96,14 +96,11 @@ function answerTool(reply: any) {
   return reply ?? { result: {}, text: 'ok' }
 }
 
-// 讓下一次 $.ui.panes 停住，用來把別的事件插進同步狀態列的讀取之間；reached 在停住時完成，release() 讓它回答
-function holdNextPanes(control: any) {
-  let reached = () => {}
-  let release = () => {}
-  const isReached = new Promise<void>(resolve => (reached = resolve))
-  const released = new Promise<void>(resolve => (release = resolve))
-  control.panesHold = { reached, released }
-  return { reached: isReached, release }
+// 讓下一次 $.ui.panes 停住，用來把別的事件插進同步狀態列的讀取之間
+function holdNextPanes(control: any): Hold {
+  const hold = createHold()
+  control.panesHold = hold
+  return hold
 }
 
 async function start($: any, turnId = 't1') {
@@ -869,7 +866,7 @@ test('/clear 發生在確認子代理在這一批之後、讀紀錄之前：不�
   await spawnAgent($)
   const hold = control.state.holdNext('get:logs')
   const calling = $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'r1' } as any)
-  await hold.reached
+  await hold.whenReached
   await $.session.end({ reason: 'clear' } as any)
   hold.release()
   await calling
@@ -883,7 +880,7 @@ test('/clear 讀到紀錄還是空的，但進行中的寫入在那之後才寫�
   // 停在新紀錄已經算好、正要寫入的時候
   const hold = control.state.holdNext('set:logs')
   const calling = $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'r1' } as any)
-  await hold.reached
+  await hold.whenReached
   await $.session.end({ reason: 'clear' } as any)
   hold.release()
   await calling
@@ -900,7 +897,7 @@ test('兩個子代理幾乎同時結束：較早開始的同步讀到還有子�
   // a1 結束後的同步已經讀到批次（a2 還在跑），停在問窗格
   const hold = holdNextPanes(control)
   const finishingFirst = $.turn.complete({ reason: 'answer', answer: '', durationMs: 1, agentId: 'a1', turnId: 'x' } as any)
-  await hold.reached
+  await hold.whenReached
   // a2 結束並同步完：都結束了，狀態列清掉
   await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1, agentId: 'a2', turnId: 'y' } as any)
   expect(control.statuses.at(-1)).toBeUndefined()
@@ -917,11 +914,11 @@ test('/clear 已經記下、還沒清空批次時開始的工具呼叫，等 /cl
   // /clear 停在清空批次前的讀取
   const clearHold = control.state.holdNext('get:batch')
   const clearing = $.session.end({ reason: 'clear' } as any)
-  await clearHold.reached
+  await clearHold.whenReached
   // 工具呼叫確認子代理時批次還在，停在讀紀錄
   const logHold = control.state.holdNext('get:logs')
   const calling = $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'r1' } as any)
-  await logHold.reached
+  await logHold.whenReached
   clearHold.release()
   await clearing
   logHold.release()
@@ -936,10 +933,10 @@ test('/clear 已經記下、還沒清空批次時開始的回覆，等 /clear �
   await spawnAgent($)
   const clearHold = control.state.holdNext('get:batch')
   const clearing = $.session.end({ reason: 'clear' } as any)
-  await clearHold.reached
+  await clearHold.whenReached
   const logHold = control.state.holdNext('get:logs')
   const stepping = step($, 'a1')
-  await logHold.reached
+  await logHold.whenReached
   clearHold.release()
   await clearing
   logHold.release()
@@ -956,7 +953,7 @@ test('工具呼叫寫完卡片、還在寫紀錄時另一個子代理結束並�
   // a2 的工具呼叫寫完卡片（a1、a2 都在跑），停在讀紀錄
   const logHold = control.state.holdNext('get:logs')
   const calling = $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a2', tool_use_id: 'r1' } as any)
-  await logHold.reached
+  await logHold.whenReached
   await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1, agentId: 'a1', turnId: 'x' } as any)
   expect(control.statuses.at(-1)).toBe('Agents ●1 ✓1')
   logHold.release()
@@ -971,7 +968,7 @@ test('工具呼叫還沒走完子代理就被中斷而結束：工具呼叫之�
   await spawnAgent($)
   const logHold = control.state.holdNext('get:logs')
   const calling = $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'r1' } as any)
-  await logHold.reached
+  await logHold.whenReached
   await $.turn.complete({ reason: 'aborted', answer: '', durationMs: 1, agentId: 'a1', turnId: 'x' } as any)
   expect(control.statuses.at(-1)).toBeUndefined()
   logHold.release()
@@ -989,7 +986,7 @@ test('最後開始的同步失敗時再試一次：比它早、讓位給它的�
   // a1 結束後的同步讀完批次（a1 已結束），停在問窗格
   const hold = holdNextPanes(control)
   const finishing = $.turn.complete({ reason: 'answer', answer: '', durationMs: 1, agentId: 'a1', turnId: 'x' } as any)
-  await hold.reached
+  await hold.whenReached
   // a2 的工具呼叫觸發較晚開始的同步，它問窗格失敗
   control.panesFailures = 1
   await $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a2', tool_use_id: 'r1' } as any)
