@@ -797,15 +797,15 @@ test('子代理結束時讀 3 次批次（確認在這一批、寫入、同步�
   expect(control.state.writes('logs')).toBe(writesBefore)
 })
 
-test('面板沒放上畫面（只有狀態列）時，子代理的一次工具呼叫也只讀 2 次批次，狀態列照舊顯示執行中', async ($, on) => {
+// 同步狀態列重新讀批次（沿用剛寫入的可能已經過時，會蓋掉別的子代理結束後的結果），所以比面板放上畫面時多 1 次
+test('面板沒放上畫面（只有狀態列）時，子代理的一次工具呼叫讀 3 次批次（確認在這一批、寫入、同步狀態列重新讀），狀態列照舊顯示執行中', async ($, on) => {
   const control = engine(on)
   control.isPlaced = false
   await start($)
   await spawnAgent($)
   const before = control.state.reads('batch')
   await $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'r1' } as any)
-  expect(control.state.reads('batch') - before).toBe(2)
-  // 同步狀態列沿用剛寫入的批次：子代理還在跑，狀態列不會被清掉
+  expect(control.state.reads('batch') - before).toBe(3)
   expect(control.statuses.at(-1)).toContain('●1')
 })
 
@@ -939,4 +939,36 @@ test('/clear 已經記下、還沒清空批次時開始的回覆，等 /clear �
   logHold.release()
   await stepping
   expect(control.state.get('logs')).toBeNull()
+})
+
+test('工具呼叫寫完卡片、還在寫紀錄時另一個子代理結束並同步：工具呼叫之後的同步不會用舊批次把狀態列蓋回去', async ($, on) => {
+  const control = engine(on)
+  control.isPlaced = false
+  await start($)
+  await spawnAgent($)
+  await spawnAgent($)
+  // a2 的工具呼叫寫完卡片（a1、a2 都在跑），停在讀紀錄
+  const logHold = control.state.holdNext('get:logs')
+  const calling = $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a2', tool_use_id: 'r1' } as any)
+  await logHold.reached
+  await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1, agentId: 'a1', turnId: 'x' } as any)
+  expect(control.statuses.at(-1)).toBe('Agents ●1 ✓1')
+  logHold.release()
+  await calling
+  expect(control.statuses.at(-1)).toBe('Agents ●1 ✓1')
+})
+
+test('工具呼叫還沒走完子代理就被中斷而結束：工具呼叫之後的同步不會讓狀態列停在執行中', async ($, on) => {
+  const control = engine(on)
+  control.isPlaced = false
+  await start($)
+  await spawnAgent($)
+  const logHold = control.state.holdNext('get:logs')
+  const calling = $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'r1' } as any)
+  await logHold.reached
+  await $.turn.complete({ reason: 'aborted', answer: '', durationMs: 1, agentId: 'a1', turnId: 'x' } as any)
+  expect(control.statuses.at(-1)).toBeUndefined()
+  logHold.release()
+  await calling
+  expect(control.statuses.at(-1)).toBeUndefined()
 })

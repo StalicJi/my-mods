@@ -105,11 +105,12 @@ async function closePanel($: EngineInterface) {
 }
 
 // 有子代理在跑時：面板放上畫面就跑動畫，沒放上就在輸入框下方釘一行狀態列；都沒在跑就停計時器、清狀態列。
-// 不在動畫的每一拍呼叫，所以狀態列不放會一直跳的耗時。knownBatch：呼叫端剛寫入的批次，有給就不再讀一次
-export async function syncTimerAndStatus($: EngineInterface, knownBatch?: Batch | null): Promise<void> {
+// 不在動畫的每一拍呼叫，所以狀態列不放會一直跳的耗時。每次都重新讀批次：沿用呼叫端剛寫入的批次可能已經過時，
+// 會蓋掉別的子代理結束後較新的結果（序號只保證最後開始的那次被套用，不保證它讀到的是最新的）
+export async function syncTimerAndStatus($: EngineInterface): Promise<void> {
   const sequence = ++syncSequence
   try {
-    const { batch, isPanelPlaced } = await readPanelState($, knownBatch)
+    const { batch, isPanelPlaced } = await readPanelState($)
     // 讀取期間又有新的同步開始：讓它決定，這次讀到的可能已經過時
     if (sequence !== syncSequence) return
     const isRunning = batch !== null && hasRunning(batch)
@@ -124,8 +125,8 @@ export async function syncTimerAndStatus($: EngineInterface, knownBatch?: Batch 
   }
 }
 
-async function readPanelState($: EngineInterface, knownBatch?: Batch | null) {
-  const [batch, panes] = await Promise.all([knownBatch !== undefined ? knownBatch : read($, batchAtom), $.ui.panes()])
+async function readPanelState($: EngineInterface) {
+  const [batch, panes] = await Promise.all([read($, batchAtom), $.ui.panes()])
   return { batch, isPanelPlaced: isPanePlaced(panes) }
 }
 
@@ -274,8 +275,9 @@ async function recordTool($: EngineInterface, agentId: string, call: ToolCallInp
     )
     if (written === undefined) return
     // 面板可能先在背景等待、終端機拉寬後才放上畫面，或被使用者按 ✕ 關掉，這些都沒有事件通知；
-    // 趁工具呼叫補啟動動畫，或補上輸入框下方的狀態列（沿用剛寫入的批次，不再讀一次）
-    if (timer === undefined) await syncTimerAndStatus($, written)
+    // 趁工具呼叫補啟動動畫，或補上輸入框下方的狀態列。同步時重新讀批次：寫紀錄期間別的子代理可能已經結束，
+    // 甚至這個子代理自己被中斷而結束，沿用剛寫入的批次會把狀態列蓋回執行中
+    if (timer === undefined) await syncTimerAndStatus($)
   } catch {
     // 略過
   }
@@ -322,9 +324,6 @@ async function recordFinish($: EngineInterface, agentId: string, reason: FinishR
   try {
     const endedAt = await $.clock.now()
     const written = await updateBatchIfChanged($, batch => (batch === null ? batch : finishAgent(batch, agentId, reason, endedAt)))
-    // 同步時重新讀批次，不沿用剛寫入的：幾個子代理幾乎同時結束時，最後開始的同步要讀到所有寫入之後的批次
-    // （syncTimerAndStatus 只套用最後開始的那次）。工具呼叫那裡沿用剛寫入的批次沒關係：那時子代理還在跑，
-    // 頂多計數晚一點更新，那個子代理結束時還會再同步一次
     if (written !== undefined) await syncTimerAndStatus($)
   } catch {
     // 略過
