@@ -62,6 +62,10 @@ bash scripts/check-contracts.sh   # 改過任何 types/index.d.ts 後執行
 
 可能有好幾個 Claude Code session 同時在改這裡的檔案，動手前先看 `git status`。
 
+### 在虛擬終端機裡實測畫面
+
+`scripts/tui-sim/` 會在背景的虛擬終端機裡跑一個暫時的 Claude Code，可以送按鍵、滑鼠事件，擷取畫面時連反白都讀得到。用來實測點擊範圍、狀態列、停靠位置這類 `claude plugin test` 測不到的地方，用法見 [scripts/tui-sim/README.md](scripts/tui-sim/README.md)。
+
 ### 推送前的私人資訊檢查
 
 `scripts/git-hooks/pre-push` 會在 `git push` 前掃描要送出去的 commit：新增的行、檔名、作者與提交者、commit 訊息。找到私有網段 IP，或私人關鍵字清單裡的字，就擋下推送。每個 clone 要做兩件事：

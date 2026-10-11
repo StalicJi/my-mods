@@ -7,3 +7,4 @@
 # 型別檢查或測試的暫存產物
 node_modules/
 *.tsbuildinfo
+__pycache__/
