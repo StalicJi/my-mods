@@ -40,6 +40,8 @@ const FOCUS_REPLY = '已要求把鍵盤交給子代理面板：Tab 移動、Ente
 const EMPTY_HINT = '這個 session 還沒有派出子代理'
 // 彗星移動與時間跳動：每 0.2 秒一拍
 const ANIMATION_MS = 200
+// 最後開始的同步失敗時最多試幾次：比它早的同步已經讓位給它，不再試的話都沒套用，狀態列會停在舊的狀態
+const SYNC_ATTEMPTS = 2
 const BAR_CELL = '▆'
 // 剛載入時不知道輸入框下方是什麼（熱重載前可能留著舊的狀態列），用它讓第一次同步一定送出
 const STATUS_UNKNOWN = Symbol('status-unknown')
@@ -108,20 +110,26 @@ async function closePanel($: EngineInterface) {
 // 不在動畫的每一拍呼叫，所以狀態列不放會一直跳的耗時。每次都重新讀批次：沿用呼叫端剛寫入的批次可能已經過時，
 // 會蓋掉別的子代理結束後較新的結果（序號只保證最後開始的那次被套用，不保證它讀到的是最新的）
 export async function syncTimerAndStatus($: EngineInterface): Promise<void> {
+  // 都失敗就略過，等下一次寫入時再同步
+  for (let attempt = 0; attempt < SYNC_ATTEMPTS; attempt++) {
+    if ((await syncOnce($)) !== 'failed') return
+  }
+}
+
+// 讀一次批次與窗格並套用。superseded：讀取期間又有新的同步開始，讓它決定（這次讀到的可能已經過時）；
+// failed：失敗，而且這次仍是最後開始的，要由呼叫端再試
+async function syncOnce($: EngineInterface): Promise<'applied' | 'superseded' | 'failed'> {
   const sequence = ++syncSequence
   try {
     const { batch, isPanelPlaced } = await readPanelState($)
-    // 讀取期間又有新的同步開始：讓它決定，這次讀到的可能已經過時
-    if (sequence !== syncSequence) return
+    if (sequence !== syncSequence) return 'superseded'
     const isRunning = batch !== null && hasRunning(batch)
     showStatus($, isRunning && !isPanelPlaced ? statusText(batch) : undefined)
-    if (!isRunning || !isPanelPlaced) {
-      stopTimer()
-      return
-    }
-    if (timer === undefined) timer = $.clock.every(ANIMATION_MS, () => void advanceFrame($))
+    if (!isRunning || !isPanelPlaced) stopTimer()
+    else if (timer === undefined) timer = $.clock.every(ANIMATION_MS, () => void advanceFrame($))
+    return 'applied'
   } catch {
-    // 略過：下一次寫入時再同步
+    return sequence === syncSequence ? 'failed' : 'superseded'
   }
 }
 

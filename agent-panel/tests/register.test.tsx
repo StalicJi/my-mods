@@ -32,6 +32,8 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
     registered: [] as any[],
     // 下一次 $.ui.panes 回答前先停住（見 holdNextPanes）
     panesHold: null as null | { reached: () => void; released: Promise<void> },
+    // 接下來幾次 $.ui.panes 回答失敗
+    panesFailures: 0,
   }
   on('prompt.submit', () => ({ text: '' }))
   on('session.end', () => ({ sessionId: 's' }))
@@ -41,6 +43,10 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
       control.panesHold = null
       hold.reached()
       await hold.released
+    }
+    if (control.panesFailures > 0) {
+      control.panesFailures--
+      return { deny: 'test: 問窗格失敗' }
     }
     return { value: control.panes }
   })
@@ -971,4 +977,23 @@ test('工具呼叫還沒走完子代理就被中斷而結束：工具呼叫之�
   logHold.release()
   await calling
   expect(control.statuses.at(-1)).toBeUndefined()
+})
+
+test('最後開始的同步失敗時再試一次：比它早、讓位給它的同步不套用，狀態列也不會停在舊的狀態', async ($, on) => {
+  const control = engine(on)
+  control.isPlaced = false
+  await start($)
+  await spawnAgent($)
+  await spawnAgent($)
+  expect(control.statuses.at(-1)).toBe('Agents ●2')
+  // a1 結束後的同步讀完批次（a1 已結束），停在問窗格
+  const hold = holdNextPanes(control)
+  const finishing = $.turn.complete({ reason: 'answer', answer: '', durationMs: 1, agentId: 'a1', turnId: 'x' } as any)
+  await hold.reached
+  // a2 的工具呼叫觸發較晚開始的同步，它問窗格失敗
+  control.panesFailures = 1
+  await $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a2', tool_use_id: 'r1' } as any)
+  hold.release()
+  await finishing
+  expect(control.statuses.at(-1)).toBe('Agents ●1 ✓1')
 })
