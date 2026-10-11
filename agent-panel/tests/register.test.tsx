@@ -903,3 +903,40 @@ test('兩個子代理幾乎同時結束：較早開始的同步讀到還有子�
   await finishingFirst
   expect(control.statuses.at(-1)).toBeUndefined()
 })
+
+test('/clear 已經記下、還沒清空批次時開始的工具呼叫，等 /clear 做完才寫紀錄：不會留下孤兒紀錄', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await spawnAgent($)
+  // /clear 停在清空批次前的讀取
+  const clearHold = control.state.holdNext('get:batch')
+  const clearing = $.session.end({ reason: 'clear' } as any)
+  await clearHold.reached
+  // 工具呼叫確認子代理時批次還在，停在讀紀錄
+  const logHold = control.state.holdNext('get:logs')
+  const calling = $.tool.call({ tool: 'Read', file_path: '/w/a.ts', agentId: 'a1', tool_use_id: 'r1' } as any)
+  await logHold.reached
+  clearHold.release()
+  await clearing
+  logHold.release()
+  await calling
+  expect(control.state.get('logs')).toBeNull()
+})
+
+test('/clear 已經記下、還沒清空批次時開始的回覆，等 /clear 做完才寫紀錄：不會留下孤兒紀錄', async ($, on) => {
+  const control = engine(on)
+  control.stepReplies.push({ answer: '先看設定檔', toolUses: [{ id: 'u', name: 'Read', input: {} }], stopReason: 'tool_use' })
+  await start($)
+  await spawnAgent($)
+  const clearHold = control.state.holdNext('get:batch')
+  const clearing = $.session.end({ reason: 'clear' } as any)
+  await clearHold.reached
+  const logHold = control.state.holdNext('get:logs')
+  const stepping = step($, 'a1')
+  await logHold.reached
+  clearHold.release()
+  await clearing
+  logHold.release()
+  await stepping
+  expect(control.state.get('logs')).toBeNull()
+})

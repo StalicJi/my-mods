@@ -461,10 +461,11 @@ export const register: Register = on => {
     stopTimer()
     clearStatus($)
     if (e.reason === 'clear') {
-      // 先記下 /clear：之前開始、還沒寫進去的紀錄，寫入時會發現而不重建
-      clearCount++
       // 批次與 selected 已經是空的就不寫：進行中的寫入不會把它們從空的重建（只有新派的子代理會，那是正常的）
       await updateBatchIfChanged($, () => null).catch(() => {})
+      // 批次清空之後才記下 /clear：在這之前開始的紀錄寫入（確認子代理時批次還在），寫入時會發現而不重建；
+      // 在這之後開始的，確認子代理時批次已經是空的，本來就不會寫。先記下的話，記下到清空批次之間開始的寫入兩邊都擋不到
+      clearCount++
       // 紀錄一律寫成空的、不先讀再決定：進行中的寫入可能在讀之後才寫進去；一定寫的話兩邊會撞版本，
       // 重試的那一方發現已經 /clear 過就不寫，最後一定是空的
       await update($, logsAtom, () => null).catch(() => {})
