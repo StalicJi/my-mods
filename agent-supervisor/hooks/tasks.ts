@@ -147,3 +147,17 @@ export function setWaiting(waiting: WaitingReports, reporter: string, text: stri
   if (waiting[reporter]?.text === trimmed) return waiting
   return { ...waiting, [reporter]: { text: trimmed, at } }
 }
+
+// 主對話常在派出子代理前就登記計畫，那時負責人只能用名字或任務說明寫；派出後再對一次，換成代理的 id，
+// 阻塞偵測才連得到那個代理。主對話與已對上的不動；沒有變化時回傳同一個陣列
+export function resolvePendingOwners(tasks: TaskRecord[], agents: readonly AgentRecord[]): TaskRecord[] {
+  let changed = false
+  const next = tasks.map(task => {
+    if (task.owner === MAIN_OWNER || agents.some(agent => agent.id === task.owner)) return task
+    const owner = resolveOwner(task.owner, agents)
+    if (owner === task.owner) return task
+    changed = true
+    return { ...task, owner }
+  })
+  return changed ? next : tasks
+}

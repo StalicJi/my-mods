@@ -3,11 +3,12 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { AgentRecord, MainLoop, SupervisorView, TaskRecord, WaitingReports } from '../types'
+import type { AgentRecord, MainLoop, SupervisorEvent, SupervisorView, TaskRecord, WaitingReports } from '../types'
 import { addSpawn, adoptListed, capAgents, describeTool, finishAgent, hasLive, reconcile, recordActivity, recordToolOutcome, toolOutcomeOf } from './agents'
-import type { FinishReason, ListedAgent } from './agents'
-import { applyNativeTool, applyReport, parseReport, setWaiting } from './tasks'
-import { overviewRows } from './view'
+import type { FinishReason, ListedAgent, ToolOutcome } from './agents'
+import { appendEvents, taskEvents, waitingEvents } from './events'
+import { applyNativeTool, applyReport, parseReport, resolvePendingOwners, setWaiting } from './tasks'
+import { viewRows } from './view'
 import type { Span } from './view'
 
 const PANE_ID = 'agent-supervisor'
@@ -18,6 +19,19 @@ const PANE_COLUMNS = 44
 const TICK_MS = 1000
 const POLL_EVERY_TICKS = 3
 const THINKING = '思考中'
+const USAGE = '用法：/supervisor 開關面板；/supervisor agents、tasks、logs 直接開那一頁；/supervisor focus 把鍵盤交給面板（之後按 A、T、L、O 切頁，R 更新，Q 關閉）。'
+// /supervisor 的參數對到分頁；logs 跟面板上的 L 一致
+const VIEW_ARGUMENTS: Record<string, SupervisorView> = { overview: 'overview', agents: 'agents', tasks: 'tasks', logs: 'events', events: 'events' }
+// 工具列：鍵盤要先把焦點交給面板才按得到；Claude Code 會在按鈕前面畫出快捷鍵（a: 代理），標籤不再寫字母；目前這一頁的按鈕不畫
+const VIEW_BUTTONS: { view: SupervisorView; hotkey: string; label: string }[] = [
+  { view: 'overview', hotkey: 'o', label: '總覽' },
+  { view: 'agents', hotkey: 'a', label: '代理' },
+  { view: 'tasks', hotkey: 't', label: '任務' },
+  { view: 'events', hotkey: 'l', label: '事件' },
+]
+// 停靠在右邊時總覽多列最近事件；放在輸入框上方時精簡，免得把 band 擠掉
+const DOCKED_LAYOUT = { maxAgents: 6, maxTasks: 6, eventCount: 3 }
+const INLINE_LAYOUT = { maxAgents: 3, maxTasks: 3, eventCount: 0, compact: true }
 // 回報工具：代理與主對話回報任務、依賴與在等什麼（使用者選的「最小回報工具」）
 const REPORT_TOOL_NAME = 'report'
 const REPORT_TOOL = 'mcp__agent-supervisor__report'
@@ -77,6 +91,7 @@ const agentsAtom = atom({ plugin: 'agent-supervisor', key: 'agents' } as const, 
 const mainAtom = atom({ plugin: 'agent-supervisor', key: 'mainLoop' } as const, IDLE_MAIN)
 const tasksAtom = atom({ plugin: 'agent-supervisor', key: 'tasks' } as const, [] as TaskRecord[])
 const waitingAtom = atom({ plugin: 'agent-supervisor', key: 'waiting' } as const, {} as WaitingReports)
+const eventsAtom = atom({ plugin: 'agent-supervisor', key: 'events' } as const, [] as SupervisorEvent[])
 // 只有面板讀，所以每秒的更新只讓面板重畫
 const tickAtom = atom({ plugin: 'agent-supervisor', key: 'tick' } as const, 0)
 // 沒有變化就不寫的寫入直接用 $.state.get／set：plugin 與 key 要是字面值，host 才掃得到
@@ -107,14 +122,53 @@ async function isPanelOpen($: EngineInterface): Promise<boolean> {
 
 async function togglePanel($: EngineInterface): Promise<{ text: string }> {
   if (await isPanelOpen($)) {
-    await $.ui.close({ id: PANE_ID }).catch(() => {})
-    await syncTimerAndStatus($)
+    await closePanel($)
     return { text: '已關閉 Agent Supervisor 面板。' }
   }
-  // 使用者打指令開的窗格任何寬度都放得下：夠寬時停靠右邊，不然放在輸入框上方
-  await $.ui.open({ id: PANE_ID, title: PANE_TITLE, columns: PANE_COLUMNS })
-  await syncTimerAndStatus($)
+  await openPanel($, false)
   return { text: '已開啟 Agent Supervisor 面板。' }
+}
+
+// 使用者打指令開的窗格任何寬度都放得下：夠寬時停靠右邊，不然放在輸入框上方。
+// focus 只是請求：輸入框有字、正在對話框裡時不會給
+async function openPanel($: EngineInterface, focus: boolean): Promise<void> {
+  await $.ui.open({ id: PANE_ID, title: PANE_TITLE, columns: PANE_COLUMNS, ...(focus && { focus: true }) })
+  await syncTimerAndStatus($)
+}
+
+async function closePanel($: EngineInterface): Promise<void> {
+  await $.ui.close({ id: PANE_ID }).catch(() => {})
+  await syncTimerAndStatus($)
+}
+
+async function runSupervisorCommand($: EngineInterface, args: string): Promise<{ text: string }> {
+  const action = args.trim().toLowerCase()
+  if (action === '') return togglePanel($)
+  if (action === 'focus') {
+    await openPanel($, true)
+    return { text: '已要求把鍵盤交給 Agent Supervisor 面板：A、T、L、O 切頁，R 更新，Q 關閉，Esc 回到輸入框。' }
+  }
+  const view = VIEW_ARGUMENTS[action]
+  if (view === undefined) return { text: USAGE }
+  await showView($, view)
+  await openPanel($, false)
+  return { text: '已開啟 Agent Supervisor 面板。' }
+}
+
+async function showView($: EngineInterface, view: SupervisorView): Promise<void> {
+  if ((await read($, viewAtom)) !== view) await update($, viewAtom, () => view)
+}
+
+// R：立刻跟 Claude Code 的代理清單對帳並重畫
+async function refreshNow($: EngineInterface): Promise<void> {
+  await pollAgentList($).catch(() => {})
+  await update($, tickAtom, frame => frame + 1)
+  await syncTimerAndStatus($)
+}
+
+async function recordEvents($: EngineInterface, added: readonly SupervisorEvent[]): Promise<void> {
+  if (added.length === 0) return
+  await update($, eventsAtom, events => appendEvents(events, added))
 }
 
 // 有還沒結束的代理時跑計時器、沒有就停；面板沒開時在輸入框下方釘一行狀態，開了或都結束了就清掉
@@ -174,7 +228,17 @@ async function recordFinish($: EngineInterface, agentId: string, reason: FinishR
   const listed = known ? [] : ((await $.agent.list().catch(() => [])) as ListedAgent[])
   const entry = listed.find(agent => agent.id === agentId && agent.teammateId === undefined)
   if (!known && entry === undefined) return
-  await changeAgents($, agents => finishAgent(entry === undefined ? agents : adoptListed(agents, entry), agentId, reason, endedAt))
+  const before = (await read($, agentsAtom)).find(agent => agent.id === agentId)
+  const agents = await changeAgents($, current => finishAgent(entry === undefined ? current : adoptListed(current, entry), agentId, reason, endedAt))
+  const after = agents.find(agent => agent.id === agentId)
+  // 重複的結束事件不再記一筆
+  if (after !== undefined && after.phase !== before?.phase) {
+    const event: SupervisorEvent =
+      after.phase === 'completed'
+        ? { at: endedAt, agentId, kind: 'complete', text: '完成' }
+        : { at: endedAt, agentId, kind: 'fail', text: `失敗：${after.failureReason ?? '失敗'}` }
+    await recordEvents($, [event])
+  }
   // 結束了就不再等什麼，免得留著舊的等待被當成阻塞
   await update($, waitingAtom, waiting => setWaiting(waiting, agentId, '', endedAt))
   await syncTimerAndStatus($)
@@ -190,6 +254,15 @@ async function recordMainActivity($: EngineInterface, activity: string) {
   await update($, mainAtom, main => ({ ...main, activity, activityAt: at }))
 }
 
+// 工具結果：累計連續失敗；失敗或被拒絕的記一筆事件，成功的不記（太多）
+async function recordToolResult($: EngineInterface, agentId: string, toolName: string, outcome: ToolOutcome): Promise<void> {
+  await changeAgents($, agents => recordToolOutcome(agents, agentId, outcome))
+  if (outcome.outcome === 'ok') return
+  const at = await $.clock.now()
+  const text = `${outcome.outcome === 'denied' ? '工具被拒絕' : '工具失敗'}：${outcome.errorLine ?? toolName}`
+  await recordEvents($, [{ at, agentId, kind: 'tool-error', text }])
+}
+
 function activityOf(tool: string, input: unknown): string {
   if (tool === 'SubagentHandback') return '交回報告'
   if (tool === REPORT_TOOL) return REPORT_ACTIVITY
@@ -203,19 +276,31 @@ async function answerReport($: EngineInterface, input: unknown, reporter: string
   const { report } = parsed
   const [agents, at] = await Promise.all([read($, agentsAtom), $.clock.now()])
   const context = { reporter, agents, at }
+  const added: SupervisorEvent[] = []
   if (report.tasks.length > 0) {
     const checked = applyReport(await read($, tasksAtom), report, context)
     if ('error' in checked) return { deny: checked.error }
-    // 再套用一次：讀到之後若有別人寫入，update 會重讀再算
+    // 再套用一次：讀到之後若有別人寫入，update 會重讀再算；事件取最後真正寫入的那次
+    let changes: SupervisorEvent[] = []
     await update($, tasksAtom, tasks => {
       const applied = applyReport(tasks, report, context)
-      return 'error' in applied ? tasks : applied.tasks
+      if ('error' in applied) return tasks
+      changes = taskEvents(tasks, applied.tasks, at)
+      return applied.tasks
     })
+    added.push(...changes)
   }
   if (report.waitingFor !== null) {
     const waitingFor = report.waitingFor
-    await update($, waitingAtom, waiting => setWaiting(waiting, reporter, waitingFor, at))
+    let changes: SupervisorEvent[] = []
+    await update($, waitingAtom, waiting => {
+      const next = setWaiting(waiting, reporter, waitingFor, at)
+      changes = waitingEvents(waiting, next, at)
+      return next
+    })
+    added.push(...changes)
   }
+  await recordEvents($, added)
   return { result: reportReply(report.tasks.length, report.waitingFor !== null) }
 }
 
@@ -230,7 +315,13 @@ async function recordNativeTask($: EngineInterface, tool: string, input: unknown
   const answered = (typeof result === 'object' && result !== null ? result : {}) as { deny?: unknown; result?: unknown }
   if (answered.deny !== undefined) return
   const [agents, at] = await Promise.all([read($, agentsAtom), $.clock.now()])
-  await update($, tasksAtom, tasks => applyNativeTool(tasks, { tool, input, result: answered.result }, { reporter, agents, at }))
+  let changes: SupervisorEvent[] = []
+  await update($, tasksAtom, tasks => {
+    const next = applyNativeTool(tasks, { tool, input, result: answered.result }, { reporter, agents, at })
+    changes = taskEvents(tasks, next, at)
+    return next
+  })
+  await recordEvents($, changes)
 }
 
 function withSubagentNote(prompt: string): string {
@@ -241,7 +332,10 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     // 名稱已被佔用時會被拒絕，不影響其他功能
-    await $.command.register({ name: 'supervisor', description: '開關 Agent Supervisor 面板：子代理、任務、阻塞與建議' }).catch(() => {})
+    // immediate：主對話還在工作時打 /supervisor 也立刻執行；處理時只開關窗格、讀 state，不依賴這一輪的狀態
+    await $.command
+      .register({ name: 'supervisor', description: '開關 Agent Supervisor 面板：子代理、任務、阻塞與建議', argumentHint: '[agents|tasks|logs|focus]', immediate: true })
+      .catch(() => {})
     // 不放在 ToolSearch 後面：子代理不用先搜尋就能回報
     await $.tool.register({ name: REPORT_TOOL_NAME, description: REPORT_TOOL_DESCRIPTION, inputSchema: REPORT_SCHEMA, isDeferred: false }).catch(() => {})
     // 熱重載或開 session 前就在跑的代理從清單補上，計時器與狀態列也接回來
@@ -258,11 +352,12 @@ export const register: Register = on => {
       await update($, mainAtom, () => IDLE_MAIN).catch(() => {})
       await update($, tasksAtom, () => []).catch(() => {})
       await update($, waitingAtom, () => ({})).catch(() => {})
+      await update($, eventsAtom, () => []).catch(() => {})
     }
     return next(e)
   })
 
-  on('command.run', { command: 'supervisor' }, async $ => togglePanel($))
+  on('command.run', { command: 'supervisor' }, async ($, e) => runSupervisorCommand($, e.args))
 
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
@@ -291,7 +386,11 @@ export const register: Register = on => {
         parentId: e.parentAgentId ?? null,
         startedAt,
       }
-      await changeAgents($, agents => addSpawn(agents, facts))
+      const isNew = !(await read($, agentsAtom)).some(agent => agent.id === facts.id)
+      const agents = await changeAgents($, current => addSpawn(current, facts))
+      // 派出前就登記的計畫，負責人寫的是名字或任務說明，現在對得到這個代理了
+      await update($, tasksAtom, tasks => resolvePendingOwners(tasks, agents))
+      if (isNew) await recordEvents($, [{ at: startedAt, agentId: facts.id, kind: 'spawn', text: '開始' }])
       await syncTimerAndStatus($)
     } catch {
       // 只觀察：出錯就略過，不影響子代理本身
@@ -333,10 +432,10 @@ export const register: Register = on => {
     } catch (error) {
       // 工具執行時拋例外：記成失敗後照樣往外丟
       const message = error instanceof Error ? error.message : String(error)
-      await changeAgents($, agents => recordToolOutcome(agents, agentId, { outcome: 'error', errorLine: message })).catch(() => {})
+      await recordToolResult($, agentId, toolName, { outcome: 'error', errorLine: message }).catch(() => {})
       throw error
     }
-    await changeAgents($, agents => recordToolOutcome(agents, agentId, toolOutcomeOf(result))).catch(() => {})
+    await recordToolResult($, agentId, toolName, toolOutcomeOf(result)).catch(() => {})
     if (NATIVE_TASK_TOOLS.has(toolName)) await recordNativeTask($, toolName, e, result, reporter).catch(() => {})
     return result
   })
@@ -352,7 +451,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
     // 一列畫成一個 Text，各段顏色是裡面的 Text；放不下就截斷，不折行
     const spanRow = (spans: Span[]) => (
       <Text wrap="truncate-end">
@@ -365,16 +464,33 @@ export const register: Register = on => {
     )
     // 畫面丟例外時 Claude Code 會卸載窗格、要再打 /supervisor 才回來；這裡接住，畫一行提示
     try {
-      const [agents, mainLoop, tasks, waiting] = await Promise.all([
+      const [agents, mainLoop, tasks, waiting, events, view] = await Promise.all([
         read($, agentsAtom),
         read($, mainAtom),
         read($, tasksAtom),
         read($, waitingAtom),
-        read($, tickAtom),
+        read($, eventsAtom),
         read($, viewAtom),
+        read($, tickAtom),
       ])
-      const rows = overviewRows({ agents, mainLoop, tasks, waiting }, { columns: e.props.bodyColumns, now: await $.clock.now() })
-      return <Box flexDirection="column">{rows.map(spanRow)}</Box>
+      const layout = e.props.placement === 'inline' ? INLINE_LAYOUT : DOCKED_LAYOUT
+      const rows = viewRows(view, { agents, mainLoop, tasks, waiting, events }, { ...layout, columns: e.props.bodyColumns, now: await $.clock.now() })
+      // 工具列：每個按鈕一個字母快捷鍵（面板拿到鍵盤時才按得到）；目前這一頁的不畫
+      const toolbar = (
+        <Box flexDirection="row" columnGap={1}>
+          {VIEW_BUTTONS.filter(button => button.view !== view).map(button => (
+            <Button key={`view-${button.view}`} hotkey={button.hotkey} plain label={button.label} onPress={() => showView($, button.view)} />
+          ))}
+          <Button key="refresh" hotkey="r" plain label="更新" onPress={() => refreshNow($)} />
+          <Button key="close" hotkey="q" plain label="關閉" onPress={() => closePanel($)} />
+        </Box>
+      )
+      return (
+        <Box flexDirection="column">
+          {toolbar}
+          {rows.map(spanRow)}
+        </Box>
+      )
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)
       return (

@@ -62,6 +62,11 @@ export type TaskRecord = {
 // 代理或主對話回報「在等什麼」（report 工具的 waitingFor）；鍵是回報者：'main' 或 agentId
 export type WaitingReports = Record<string, { text: string; at: number }>
 
+export type EventKind = 'spawn' | 'complete' | 'fail' | 'tool-error' | 'task' | 'waiting' | 'resolved'
+
+// 事件串的一筆：時間、哪個代理（主對話是 'main'）、種類、一句話說明。只留最近 50 筆
+export type SupervisorEvent = { at: number; agentId: string | null; kind: EventKind; text: string }
+
 declare module 'claude-code' {
   interface PluginState {
     'agent-supervisor': {
@@ -70,6 +75,7 @@ declare module 'claude-code' {
       mainLoop: MainLoop
       tasks: TaskRecord[]
       waiting: WaitingReports
+      events: SupervisorEvent[]
       // 計時器每一拍加一，只有面板讀，用來更新經過時間
       tick: number
     }

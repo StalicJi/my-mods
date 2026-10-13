@@ -1,19 +1,27 @@
 // 面板的版面：把狀態組成一列一列的文字片段（Span），register.tsx 只負責畫出來。
 // 每一列都依顯示寬度截斷在面板寬度內，窄的 cmux 分割窗格也不會折行
-import type { AgentPhase, AgentRecord, MainLoop, TaskRecord, TaskStatus, WaitingReports } from '../types'
+import type { AgentPhase, AgentRecord, MainLoop, SupervisorEvent, SupervisorView, TaskRecord, TaskStatus, WaitingReports } from '../types'
 import { blockedSubjects, detectBlockers, suggestActions } from './blockers'
 import type { Blocker } from './blockers'
 import { agentName, ownerName } from './names'
 import { taskProgress } from './tasks'
-import { displayWidth, fitToWidth, formatDuration, padToWidth } from './text'
+import { displayWidth, fitToWidth, formatClock, formatDuration, padToWidth } from './text'
 
 export type Span = { text: string; color?: string; isDim?: boolean; isBold?: boolean }
 export type Row = Span[]
 export type StatusLabel = 'RUNNING' | 'IDLE' | 'BLOCKED' | 'COMPLETED' | 'FAILED' | 'UNKNOWN'
 // isInferred：推測的狀態（不是事件或 Claude Code 確認的），畫面上加「?」
 export type DisplayStatus = { label: StatusLabel; isInferred: boolean }
-export type OverviewModel = { agents: readonly AgentRecord[]; mainLoop: MainLoop; tasks: readonly TaskRecord[]; waiting: WaitingReports }
-export type ViewOptions = { columns: number; now: number; maxAgents?: number; maxTasks?: number }
+export type OverviewModel = {
+  agents: readonly AgentRecord[]
+  mainLoop: MainLoop
+  tasks: readonly TaskRecord[]
+  waiting: WaitingReports
+  events: readonly SupervisorEvent[]
+}
+// eventCount：總覽列最近幾筆事件，0 是不畫事件區（放在輸入框上方的精簡版）
+// compact：放在輸入框上方的精簡版，每個代理一列、區塊之間不空行、阻塞一條一列
+export type ViewOptions = { columns: number; now: number; maxAgents?: number; maxTasks?: number; eventCount?: number; compact?: boolean }
 
 type StatusStyle = { mark: string; color?: string; isDim?: boolean }
 
@@ -57,24 +65,35 @@ export function agentStatus(agent: AgentRecord, isBlocked = false): DisplayStatu
 export function overviewRows(model: OverviewModel, options: ViewOptions): Row[] {
   const blockers = detectBlockers(model)
   const blocked = blockedSubjects(blockers)
-  const rows: Row[] = [...mainRows(model.mainLoop, blocked.has('main'), options.columns)]
+  const isCompact = options.compact === true
+  // 區塊之間空一列；精簡版不空
+  const gap = (): Row[] => (isCompact ? [] : [blankRow()])
+  const main = mainRows(model.mainLoop, blocked.has('main'), options.columns)
+  const rows: Row[] = isCompact ? main.slice(0, 1) : [...main]
   // 什麼都還沒有：只寫一行說明，不畫空的區塊
   if (model.agents.length === 0 && model.tasks.length === 0) {
-    rows.push(blankRow(), [{ text: EMPTY_HINT, isDim: true }])
+    rows.push(...gap(), [{ text: EMPTY_HINT, isDim: true }])
     return fitRows(rows, options.columns)
   }
   const sorted = sortAgents(model.agents, blocked)
   const shown = sorted.slice(0, options.maxAgents ?? DEFAULT_MAX_AGENTS)
-  rows.push(blankRow(), sectionRow('AGENTS'))
+  rows.push(...gap(), sectionRow('AGENTS'))
   if (shown.length === 0) rows.push([{ text: INDENT + EMPTY_HINT, isDim: true }])
-  for (const agent of shown) rows.push(...agentRows(agent, agentStatus(agent, blocked.has(agent.id)), options))
+  for (const agent of shown) {
+    const agentLines = agentRows(agent, agentStatus(agent, blocked.has(agent.id)), options)
+    rows.push(...(isCompact ? agentLines.slice(0, 1) : agentLines))
+  }
   const hiddenCount = sorted.length - shown.length
   if (hiddenCount > 0) rows.push([{ text: `${INDENT}還有 ${hiddenCount} 個代理`, isDim: true }])
-  rows.push(blankRow(), ...tasksRows(model, blockers, options))
-  if (blockers.length > 0) rows.push(blankRow(), ...attentionRows(blockers, model))
+  rows.push(...gap(), ...tasksRows(model, blockers, options))
+  if (blockers.length > 0) rows.push(...gap(), ...attentionRows(blockers, model, isCompact))
   const suggestions = suggestActions(model, blockers)
-  if (suggestions.length > 0) rows.push(blankRow(), sectionRow('SUGGESTED ACTION'), ...suggestions.map(text => [{ text: `→ ${text}` }]))
-  if (shown.some(agent => agentStatus(agent).isInferred)) rows.push(blankRow(), [{ text: INFERRED_LEGEND, isDim: true }])
+  if (suggestions.length > 0) rows.push(...gap(), sectionRow('SUGGESTED ACTION'), ...suggestions.map(text => [{ text: `→ ${text}` }]))
+  const eventCount = options.eventCount ?? 0
+  if (eventCount > 0 && model.events.length > 0) {
+    rows.push(...gap(), sectionRow('EVENTS'), ...model.events.slice(-eventCount).map(event => eventRow(event, model.agents)))
+  }
+  if (shown.some(agent => agentStatus(agent).isInferred)) rows.push(...gap(), [{ text: INFERRED_LEGEND, isDim: true }])
   return fitRows(rows, options.columns)
 }
 
@@ -141,8 +160,64 @@ export function sortAgents(agents: readonly AgentRecord[], blocked: ReadonlySet<
     .map(entry => entry.agent)
 }
 
-// 阻塞區：每一條兩列，第一列誰被誰擋住（可能的標 POSSIBLE BLOCKER），第二列原因
-function attentionRows(blockers: readonly Blocker[], model: OverviewModel): Row[] {
+// 依目前的分頁畫：總覽，或只看代理、任務、事件
+export function viewRows(view: SupervisorView, model: OverviewModel, options: ViewOptions): Row[] {
+  if (view === 'agents') return agentsViewRows(model, options)
+  if (view === 'tasks') return tasksViewRows(model, options)
+  if (view === 'events') return eventsViewRows(model, options)
+  return overviewRows(model, options)
+}
+
+// 代理頁：全部代理，每個多寫 id、派出者、工具次數與最近活動，失敗的寫原因
+function agentsViewRows(model: OverviewModel, options: ViewOptions): Row[] {
+  const blockers = detectBlockers(model)
+  const blocked = blockedSubjects(blockers)
+  const rows: Row[] = [...mainRows(model.mainLoop, blocked.has('main'), options.columns), blankRow(), sectionRow(`AGENTS（${model.agents.length}）`)]
+  if (model.agents.length === 0) rows.push([{ text: INDENT + EMPTY_HINT, isDim: true }])
+  for (const agent of sortAgents(model.agents, blocked)) {
+    const status = agentStatus(agent, blocked.has(agent.id))
+    const parent = agent.parentId === null ? '主對話派出' : `由 ${ownerName(agent.parentId, model.agents)} 派出`
+    const activity = agent.activity === '' ? '' : ` · 最近：${agent.activity}`
+    rows.push(
+      titleRow(agentName(agent), status, options.columns),
+      [{ text: `${INDENT}任務：${agent.description || UNKNOWN_TEXT}`, isDim: true }],
+      detailRow(`id ${agent.id} · ${parent} · ${agent.toolCount} 次工具${activity}`, elapsedText(agent, options.now), options.columns),
+    )
+    if (agent.detail !== null) rows.push([{ text: `${INDENT}${agent.detail}`, isDim: true }])
+    if (agent.phase === 'failed') rows.push([{ text: `${INDENT}原因：${agent.failureReason ?? '失敗'}`, color: 'error' }])
+  }
+  if (model.agents.some(agent => agentStatus(agent).isInferred)) rows.push(blankRow(), [{ text: INFERRED_LEGEND, isDim: true }])
+  return fitRows(rows, options.columns)
+}
+
+// 任務頁：全部任務與阻塞
+function tasksViewRows(model: OverviewModel, options: ViewOptions): Row[] {
+  const blockers = detectBlockers(model)
+  const rows: Row[] = [...tasksRows(model, blockers, { ...options, maxTasks: Number.POSITIVE_INFINITY })]
+  if (blockers.length > 0) rows.push(blankRow(), ...attentionRows(blockers, model))
+  return fitRows(rows, options.columns)
+}
+
+// 事件頁：全部事件（最多 50 筆），新的在上
+function eventsViewRows(model: OverviewModel, options: ViewOptions): Row[] {
+  const rows: Row[] = [sectionRow(`EVENTS（${model.events.length}）`)]
+  if (model.events.length === 0) rows.push([{ text: `${INDENT}${UNKNOWN_TEXT}：還沒有事件`, isDim: true }])
+  rows.push(...[...model.events].reverse().map(event => eventRow(event, model.agents)))
+  return fitRows(rows, options.columns)
+}
+
+const EVENT_COLORS: Partial<Record<SupervisorEvent['kind'], string>> = { fail: 'error', 'tool-error': 'error', waiting: 'warning', complete: 'success' }
+
+function eventRow(event: SupervisorEvent, agents: readonly AgentRecord[]): Row {
+  return [
+    { text: `${formatClock(event.at)} `, isDim: true },
+    { text: `${ownerName(event.agentId ?? 'main', agents)} `, isBold: true },
+    { text: event.text, color: EVENT_COLORS[event.kind] },
+  ]
+}
+
+// 阻塞區：每一條兩列，第一列誰被誰擋住（可能的標 POSSIBLE BLOCKER），第二列原因；精簡版併成一列
+function attentionRows(blockers: readonly Blocker[], model: OverviewModel, isCompact = false): Row[] {
   const name = (subject: string) => ownerName(subject, model.agents)
   return [
     sectionRow('ATTENTION'),
@@ -151,6 +226,7 @@ function attentionRows(blockers: readonly Blocker[], model: OverviewModel): Row[
         blocker.certainty === 'possible'
           ? { text: `? POSSIBLE BLOCKER：${name(blocker.subject)}`, color: 'warning', isDim: true }
           : { text: `⚠ ${name(blocker.subject)}${blocker.dependsOn === null ? '' : ` 被 ${name(blocker.dependsOn)} 擋住`}`, color: 'warning', isBold: true }
+      if (isCompact) return [[title, { text: `：${blocker.reason}`, isDim: true }]]
       return [[title], [{ text: INDENT + blocker.reason, isDim: true }]]
     }),
   ]

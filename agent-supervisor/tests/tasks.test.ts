@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import { addSpawn } from '../hooks/agents'
-import { applyNativeTool, applyReport, capTasks, parseReport, resolveOwner, setWaiting, taskProgress } from '../hooks/tasks'
+import { applyNativeTool, applyReport, capTasks, parseReport, resolveOwner, resolvePendingOwners, setWaiting, taskProgress } from '../hooks/tasks'
 import type { AgentRecord, TaskRecord } from '../types'
 
 const agents: AgentRecord[] = addSpawn(
@@ -112,5 +112,18 @@ describe('等待回報', () => {
     expect(setWaiting(waiting, 'a2', '', 9)).toEqual({})
     const empty = {}
     expect(setWaiting(empty, 'a2', '', 9)).toBe(empty)
+  })
+})
+
+describe('負責人補對', () => {
+  test('登記時還沒派出的代理：派出後把用名字或任務說明寫的負責人換成它的 id；主對話與已對上的不動', () => {
+    const tasks = [
+      { id: 'T1', title: 'a', status: 'pending', owner: '做前端畫面', blockedBy: [], source: 'report', updatedAt: 0 },
+      { id: 'T2', title: 'b', status: 'pending', owner: 'main', blockedBy: [], source: 'report', updatedAt: 0 },
+      { id: 'T3', title: 'c', status: 'pending', owner: 'a1', blockedBy: [], source: 'report', updatedAt: 0 },
+    ] as TaskRecord[]
+    const resolved = resolvePendingOwners(tasks, agents)
+    expect(resolved.map(task => task.owner)).toEqual(['a2', 'main', 'a1'])
+    expect(resolvePendingOwners(resolved, agents)).toBe(resolved)
   })
 })

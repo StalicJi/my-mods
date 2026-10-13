@@ -2,11 +2,11 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { addSpawn, finishAgent, reconcile, recordActivity, recordToolOutcome } from '../hooks/agents'
 import { displayWidth } from '../hooks/text'
-import { agentStatus, overviewRows } from '../hooks/view'
-import type { AgentRecord, MainLoop, TaskRecord } from '../types'
+import { agentStatus, overviewRows, viewRows } from '../hooks/view'
+import type { AgentRecord, MainLoop, SupervisorEvent, TaskRecord } from '../types'
 
 const MAIN_IDLE: MainLoop = { isRunning: false, activity: '', activityAt: null }
-const EMPTY = { agents: [] as AgentRecord[], tasks: [] as TaskRecord[], waiting: {} }
+const EMPTY = { agents: [] as AgentRecord[], tasks: [] as TaskRecord[], waiting: {}, events: [] as SupervisorEvent[] }
 const spawn = (id: string, patch: object = {}) => ({ id, name: null, agentType: 'general-purpose', description: `任務 ${id}`, parentId: null, startedAt: 0, ...patch })
 const textOf = (row: { text: string }[]) => row.map(span => span.text).join('')
 const rowsText = (rows: { text: string }[][]) => rows.map(textOf)
@@ -162,5 +162,62 @@ describe('阻塞與建議', () => {
     const rows = rowsText(overviewRows({ ...EMPTY, agents: pair(), mainLoop: MAIN_IDLE }, { columns: 60, now: 0 }))
     expect(rows).not.toContain('ATTENTION')
     expect(rows).not.toContain('SUGGESTED ACTION')
+  })
+})
+
+describe('事件區與分頁', () => {
+  const backend = () => addSpawn([], spawn('b', { name: 'backend', description: '實作 API' }))
+  const events = Array.from({ length: 5 }, (_, index) => ({ at: index * 1000, agentId: 'b', kind: 'task' as const, text: `事件 ${index}` }))
+
+  test('總覽在停靠時列最近 3 筆事件（舊到新），事件寫時間、代理名稱與說明', () => {
+    const rows = rowsText(overviewRows({ ...EMPTY, agents: backend(), events, mainLoop: MAIN_IDLE }, { columns: 60, now: 0, eventCount: 3 }))
+    const header = rows.indexOf('EVENTS')
+    expect(rows.slice(header + 1, header + 4).map(row => row.replace(/^\d\d:\d\d:\d\d /, ''))).toEqual(['backend 事件 2', 'backend 事件 3', 'backend 事件 4'])
+    expect(rows[header + 1]).toMatch(/^\d\d:\d\d:\d\d /)
+  })
+
+  test('總覽不要求事件（放在輸入框上方的精簡版）時不畫事件區', () => {
+    const rows = rowsText(overviewRows({ ...EMPTY, agents: backend(), events, mainLoop: MAIN_IDLE }, { columns: 60, now: 0, eventCount: 0 }))
+    expect(rows).not.toContain('EVENTS')
+  })
+
+  test('代理頁列出全部代理，每個多一列寫 id、派出者、工具次數與最近活動', () => {
+    let agents = backend()
+    agents = recordActivity(agents, 'b', { activity: '讀取 api.ts', at: 0, isToolCall: true })
+    const rows = rowsText(viewRows('agents', { ...EMPTY, agents, mainLoop: MAIN_IDLE }, { columns: 60, now: 0 }))
+    expect(rows.some(row => /backend.*RUNNING$/.test(row))).toBe(true)
+    expect(rows).toContain('  任務：實作 API')
+    expect(rows.some(row => row.includes('id b · 主對話派出 · 1 次工具 · 最近：讀取 api.ts'))).toBe(true)
+  })
+
+  test('任務頁列出全部任務與阻塞', () => {
+    const tasks = Array.from({ length: 9 }, (_, index) => task(`T${index}`, 'pending', { owner: 'b' }))
+    const rows = rowsText(viewRows('tasks', { ...EMPTY, agents: backend(), tasks, mainLoop: MAIN_IDLE }, { columns: 60, now: 0 }))
+    expect(rows.filter(row => row.startsWith('  [ ] T'))).toHaveLength(9)
+  })
+
+  test('事件頁列出全部事件，新的在上', () => {
+    const rows = rowsText(viewRows('events', { ...EMPTY, agents: backend(), events, mainLoop: MAIN_IDLE }, { columns: 60, now: 0 }))
+    const listed = rows.filter(row => /^\d\d:\d\d:\d\d /.test(row)).map(row => row.slice(9))
+    expect(listed).toEqual(['backend 事件 4', 'backend 事件 3', 'backend 事件 2', 'backend 事件 1', 'backend 事件 0'])
+  })
+
+  test('沒有事件時事件頁寫 Unknown 說明', () => {
+    const rows = rowsText(viewRows('events', { ...EMPTY, mainLoop: MAIN_IDLE }, { columns: 60, now: 0 }))
+    expect(rows.join('\n')).toContain('還沒有事件')
+  })
+})
+
+describe('精簡版（放在輸入框上方）', () => {
+  test('每個代理只一列、區塊之間不空行、阻塞一條一列，建議照樣保留', () => {
+    let agents = addSpawn(addSpawn([], spawn('b', { name: 'backend' })), spawn('f', { name: 'frontend' }))
+    agents = recordActivity(agents, 'b', { activity: '讀取 api.ts', at: 0, isToolCall: true })
+    const tasks = [task('B1', 'in_progress', { owner: 'b', title: '定義 API' }), task('F1', 'in_progress', { owner: 'f', title: '畫面', blockedBy: ['B1'] })]
+    const rows = rowsText(overviewRows({ ...EMPTY, agents, tasks, mainLoop: MAIN_IDLE }, { columns: 60, now: 0, compact: true }))
+    expect(rows).not.toContain(' ')
+    expect(rows.some(row => row.includes('讀取 api.ts'))).toBe(false)
+    expect(rows.some(row => /frontend.*BLOCKED$/.test(row))).toBe(true)
+    expect(rows).toContain('⚠ frontend 被 backend 擋住：「畫面」要等「定義 API」')
+    expect(rows).toContain('→ 先完成「定義 API」（backend），frontend 才能繼續')
   })
 })
