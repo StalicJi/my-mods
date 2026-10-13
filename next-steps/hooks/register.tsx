@@ -13,10 +13,11 @@
 //
 // 本檔案已修改（fork 自 anthropics/claude-plugins-community 的 next-steps 1.0.0）：
 // forkPrompt 加上 SUGGESTION_LANGUAGE，要求建議一律用繁體中文（台灣用語）；
-// 清單顯示時把 state `active` 設成 true，讓 where-am-i 讓出它摘要框裡的「Next:」。
+// 清單顯示時把 state `active` 設成 true，讓 where-am-i 讓出它摘要框裡的「Next:」；
+// band 放不下時拿掉清單上面的空白列；清單插在 gitlab-sync 那一列上面，讓那一列緊貼輸入框。
 
 import { atom, update } from 'claude-code'
-import type { CommandInfo, EngineInterface, Register, RenderElement } from 'claude-code'
+import type { CommandInfo, EngineInterface, Register, RenderElement, RenderNode } from 'claude-code'
 
 type Suggestion = { label: string; prompt: string }
 
@@ -29,6 +30,9 @@ const MAX_SUGGESTIONS = 3
 // band 裡其他 mod 大約佔的列數：where-am-i 的摘要框（清單顯示時它讓出 Next，外框 2 列加 Goal、Now、Wait）5 列，
 // 加上 gitlab-sync 一列。這個 mod 看不到它們畫了什麼，用估計值判斷整排放不放得下
 const OTHER_BAND_ROWS = 6
+// gitlab-sync 那一列的 key（gitlab-sync/hooks/register.tsx 的 BAND_KEY），改名要兩邊一起改。那一列固定在 band 最下面、
+// 緊貼輸入框；串接順序上這個 mod 包在 gitlab-sync 外面，照常接在最後會跑到那一列下面，所以清單插在它上面
+const GITLAB_BAND_KEY = 'gitlab-band'
 const LABEL_MAX = 48
 const PROMPT_MAX = 600
 const SKILL_NAME_MAX = 64
@@ -219,26 +223,15 @@ export const register: Register = (on, options) => {
     if (e.props.hasSurvey || e.props.isWorking || view.kind === 'hidden') return below
     const { Box, Text, Button } = $.ui.resolve(e)
 
-    if (view.kind === 'loading') {
-      return (
-        <Box flexDirection="column">
-          {below}
-          <Box marginTop={gapRows(e.props.maxRows, 1)}>
-            <Text dimColor>next steps…</Text>
-          </Box>
-        </Box>
-      )
-    }
-
-    const items = view.items
-    // 「next:」、每個選項各一列、dismiss
-    const listRows = 1 + items.length + 1
-    return (
-      <Box flexDirection="column">
-        {below}
-        <Box marginTop={gapRows(e.props.maxRows, listRows)} />
+    const block = view.kind === 'loading' ? (
+      <Box marginTop={gapRows(e.props.maxRows, 1)}>
+        <Text dimColor>next steps…</Text>
+      </Box>
+    ) : (
+      // 「next:」、每個選項各一列、dismiss
+      <Box flexDirection="column" marginTop={gapRows(e.props.maxRows, 1 + view.items.length + 1)}>
         <Text dimColor>next:</Text>
-        {items.map((item, index) => (
+        {view.items.map((item, index) => (
           <Box key={`s${index}`} marginLeft={2}>
             <Button
               key={`pick${index + 1}`}
@@ -260,6 +253,15 @@ export const register: Register = (on, options) => {
         </Box>
       </Box>
     )
+    // gitlab-sync 那一列要緊貼輸入框，有它就插在它上面；沒有（不在 repo、有問卷時）就照舊接在最後
+    return (
+      (insertBeforeKey(below, GITLAB_BAND_KEY, block) as RenderElement | null) ?? (
+        <Box flexDirection="column">
+          {below}
+          {block}
+        </Box>
+      )
+    )
   })
 }
 
@@ -267,4 +269,28 @@ export const register: Register = (on, options) => {
 // 所以放不下時先拿掉上面的空白列。where-am-i 判斷要不要拿掉外框時，把這裡算成沒有空白列，改規則要兩邊一起看
 export function gapRows(maxRows: number, listRows: number): number {
   return OTHER_BAND_ROWS + 1 + listRows <= maxRows ? 1 : 0
+}
+
+// 在 tree 裡找 key 為 key 的元素，把 block 插在它前面，回傳換過的 tree；找不到回傳 null。
+// 從後面找起：要找的那一列通常在最後。tree 是 next(e) 給的唯讀資料，沿路的節點都換成新的物件
+export function insertBeforeKey(node: RenderNode, key: string, block: RenderElement): RenderNode | null {
+  const children = childrenOf(node)
+  if (children === null) return null
+  const index = children.findIndex(child => keyOf(child) === key)
+  if (index >= 0) return { ...(node as object), children: [...children.slice(0, index), block, ...children.slice(index)] } as RenderNode
+  for (let position = children.length - 1; position >= 0; position--) {
+    const replaced = insertBeforeKey(children[position] as RenderNode, key, block)
+    if (replaced !== null) return { ...(node as object), children: children.map((child, at) => (at === position ? replaced : child)) } as RenderNode
+  }
+  return null
+}
+
+function childrenOf(node: RenderNode): RenderNode[] | null {
+  if (typeof node !== 'object' || node === null || !('children' in node)) return null
+  return Array.isArray(node.children) ? (node.children as RenderNode[]) : null
+}
+
+function keyOf(node: RenderNode): unknown {
+  if (typeof node !== 'object' || node === null || !('props' in node)) return undefined
+  return (node.props as Record<string, unknown> | undefined)?.key
 }

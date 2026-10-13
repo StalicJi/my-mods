@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { gapRows } from '../hooks/register'
+import { gapRows, insertBeforeKey } from '../hooks/register'
 
 const SURFACES = ['terminal', 'desktop'] as const
 
@@ -197,5 +197,85 @@ describe('band 放不下時拿掉「next:」上面的空白列', () => {
     const tight = await $.ui.mount(bandWith(7) as any)
     expect(gapCount(await tight.drawn())).toBe(0)
     await tight.unmount()
+  })
+})
+
+describe('清單插在 gitlab-sync 那一列上面，讓那一列緊貼輸入框', () => {
+  // 代替串接在裡面的 gitlab-sync 與 Claude Code：其他內容在上、gitlab-sync 那一列（key gitlab-band）在最後
+  function engineWithGitlabLine(on: any, reply: string) {
+    const sent = { filled: '' }
+    on('turn.complete', () => ({ text: '' }))
+    on('command.list', () => ({ value: [] }))
+    on('model.fork', () => ({ value: { isAnswered: true, text: reply, usage: USAGE } }))
+    on('prompt.suggest', () => ({ isShown: true }))
+    on('prompt.fill', (_$: any, e: any) => {
+      sent.filled = e.text
+      return { isFilled: true }
+    })
+    on('ui.render', ($: any, e: any) => {
+      const { Box, Text } = $.ui.resolve(e)
+      return Box({
+        flexDirection: 'column',
+        children: [Text({ children: 'engine draws' }), Box({ key: 'gitlab-band', children: [Text({ children: 'GitLab line' })] })],
+      })
+    })
+    return sent
+  }
+
+  // 畫出來的文字依序排成一串
+  function textsOf(node: any): string[] {
+    if (typeof node === 'string') return [node]
+    if (!node || typeof node !== 'object') return []
+    return ((node.children ?? []) as unknown[]).flatMap(textsOf)
+  }
+
+  test('清單在 gitlab-sync 那一列上面，那一列仍是最後一列', async ($, on) => {
+    engineWithGitlabLine(on, TWO_SUGGESTIONS)
+    await finishTurn($)
+    await wait()
+
+    const ui = await $.ui.mount(bandWith(11) as any)
+    const texts = textsOf(await ui.drawn())
+    expect(texts[texts.length - 1]).toBe('GitLab line')
+    expect(texts.indexOf('engine draws')).toBeLessThan(texts.indexOf('next:'))
+    expect(texts.indexOf('next:')).toBeLessThan(texts.indexOf('GitLab line'))
+    await ui.unmount()
+  })
+
+  test('插進去之後按鈕照樣能按', async ($, on) => {
+    const sent = engineWithGitlabLine(on, TWO_SUGGESTIONS)
+    await finishTurn($)
+    await wait()
+
+    const ui = await $.ui.mount(bandWith(11) as any)
+    await ui.press({ key: 'pick2' })
+    await wait()
+    expect(sent.filled).toBe('幫我 commit')
+    await ui.unmount()
+  })
+
+  test('沒有 gitlab-sync 那一列時照舊接在最後', async ($, on) => {
+    engine(on, TWO_SUGGESTIONS)
+    await finishTurn($)
+    await wait()
+
+    const ui = await $.ui.mount(bandWith(11) as any)
+    const drawn: any = await ui.drawn()
+    expect(drawn.children[0]).toMatchObject({ type: 'engine' })
+    expect(JSON.stringify(drawn.children[1])).toContain('next:')
+    await ui.unmount()
+  })
+
+  test('insertBeforeKey 往下層找，沿路換成新的物件，原本的 tree 不動；找不到回傳 null', () => {
+    const line = { type: 'Box', props: { key: 'gitlab-band' }, children: ['GitLab line'] }
+    const inner = { type: 'Box', props: { flexDirection: 'column' }, children: ['rest', line] }
+    const tree = Object.freeze({ type: 'Box', props: { flexDirection: 'column' }, children: ['box', inner] })
+    const block = { type: 'Text', children: ['next:'] }
+
+    const placed: any = insertBeforeKey(tree as any, 'gitlab-band', block as any)
+    expect(placed.children[1].children).toEqual(['rest', block, line])
+    expect(inner.children).toEqual(['rest', line])
+    expect(insertBeforeKey(tree as any, 'missing', block as any)).toBeNull()
+    expect(insertBeforeKey('text' as any, 'gitlab-band', block as any)).toBeNull()
   })
 })

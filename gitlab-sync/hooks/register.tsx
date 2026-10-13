@@ -47,6 +47,8 @@ const TOAST_COLUMNS = 100
 // band 是一行字，不加框也不上底色（框、底色、膠囊兩端都試過，使用者都不要）。
 // 文字前留兩格：上方 where-am-i 的摘要框是「框線一格＋內距一格」才寫字，兩邊的文字起點才會對齊
 const BAND_PADDING_X = 2
+// 這一列的 key：next-steps 靠它找到這一列，把清單插在它上面（next-steps/hooks/register.tsx 的 GITLAB_BAND_KEY），改名要兩邊一起改
+const BAND_KEY = 'gitlab-band'
 // 背景跑的 git 不能停在密碼提示，連不上就直接失敗
 const GIT_ENV = { GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' }
 const EMPTY_INBOX: InboxStatus = { unreadCount: 0, problem: null, openCounts: null }
@@ -617,12 +619,14 @@ export const register: Register = (on, options) => {
         )}
       </Text>
     )
+    // 排在 band 最下面，緊貼輸入框：其他 mod 與 Claude Code 的內容都在上面。
+    // 串接順序上包在這個 mod 外面、又要接在最後的 next-steps，會把清單插在這一列上面
     return (
       <Box flexDirection="column">
-        <Box key="gitlab-band" paddingX={BAND_PADDING_X}>
+        {rest}
+        <Box key={BAND_KEY} paddingX={BAND_PADDING_X}>
           {line}
         </Box>
-        {rest}
       </Box>
     )
   })

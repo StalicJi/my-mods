@@ -689,6 +689,22 @@ describe('整合情境', () => {
     }
   })
 
+  test('這一列排在 band 最下面、緊貼輸入框：其他 mod 與 Claude Code 畫的內容都在它上面', OPTIONS, async ($, on) => {
+    mock.clock(on, { now: T0 })
+    mock.store(on)
+    on('env.get', () => ({ value: 'test-token' }))
+    fakeCommands(on, () => ({ root: '/work-q', branch: 'main', upstream: 'origin/main', counts: '0\t0', status: '' }))
+    fakeGitlab(on, path => (path === '/user' ? ME : []))
+
+    await start($, on)
+    const ui = await $.ui.mount({ plugin: 'gitlab-sync', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS } as any)
+    const drawn: any = await ui.drawn()
+    const last = drawn.children[drawn.children.length - 1]
+    expect(last.props).toMatchObject({ key: 'gitlab-band' })
+    expect(JSON.stringify(drawn).indexOf('engine draws')).toBeLessThan(JSON.stringify(drawn).indexOf('⎇ main'))
+    await ui.unmount()
+  })
+
   test('band 的還開著的 issue 張數：背景輪詢會更新，查不到或通知暫停時不留舊數字', OPTIONS, async ($, on) => {
     const clock = mock.clock(on, { now: T0 })
     mock.store(on)
