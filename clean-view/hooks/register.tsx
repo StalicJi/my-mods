@@ -119,6 +119,13 @@ const PLAN_INSTRUCTIONS = [
   `Write the progress notes between tool calls, and any status update you give in reply to a system reminder, in ${READER_LANGUAGE} even when your thinking or the reminder is in English; keep code identifiers, commands and paths as they are.`,
 ].join('\n')
 
+// 每則送出的訊息都附這一則提醒：放在 system prompt 與 CLAUDE.md 的語言規則在很長的 session 裡會被大量英文資料
+// （型別定義、文件、工具輸出、英文的系統提醒）蓋過，連最後的回覆都漂成英文（2026-10-08、10-13 都發生過）。
+// 附在最新的這則訊息上，每一輪都在離回覆最近的位置
+const LANGUAGE_REMINDER =
+  `Reply in ${READER_LANGUAGE}: the final answer, the progress notes between tool calls, and any status update after a system reminder, ` +
+  'even when what you read is in English. Keep code identifiers, commands and paths as they are.'
+
 // 附在每個子代理任務尾端的語言要求；內容固定，同一句不論附幾次都一樣
 const SUBAGENT_LANGUAGE_NOTE = [
   '# Language',
@@ -241,7 +248,7 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e, next) => {
     await update($, plan, current => (isPlanFinished(current) ? [] : current))
     await refreshPlanBand($)
-    return next(e)
+    return next({ ...e, context: [...(e.context ?? []), LANGUAGE_REMINDER] })
   })
 
   // subagent 的執行不會發 turn.start，只有主迴圈會

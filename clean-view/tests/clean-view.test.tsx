@@ -43,6 +43,8 @@ const DONE_STEPS = STEPS.map(step => ({ ...step, status: 'completed' as const })
 
 // 每次註冊計畫工具時收到的參數（說明與參數格式）
 const toolRegistrations: any[] = []
+// 每則送出的訊息帶給模型的 context（mod 附加的提醒在這裡）
+const submittedContexts: (readonly string[])[] = []
 
 // 代替 mod 底下的 engine；drawBand 換掉 band 底下的內容（例如串接在裡面的 gitlab-sync 那一段）
 function engine(on: any, drawBand?: ($: any, e: any) => unknown) {
@@ -53,7 +55,10 @@ function engine(on: any, drawBand?: ($: any, e: any) => unknown) {
     toolRegistrations.push(e)
     return { value: { tool: PLAN_TOOL } }
   })
-  on('prompt.submit', () => ({ text: '' }))
+  on('prompt.submit', (_$: any, e: any) => {
+    submittedContexts.push(e.context ?? [])
+    return { text: '' }
+  })
   on('turn.start', () => ({ turnId: 'turn-1' }))
   on('turn.complete', () => ({ text: '' }))
   on('ui.render', ($: any, e: any) => {
@@ -440,6 +445,20 @@ describe('clean-view 進度條動畫', () => {
     await $.prompt.submit({ text: '會被擋下的訊息' } as any)
     await clock.advance(600)
     expect(await cometHead($)).toBe(0)
+  })
+})
+
+describe('clean-view 每則訊息的語言提醒', () => {
+  test('每次送出訊息都附一則繁體中文提醒，放在這則訊息上（最新的位置），原本的 context 保留', async ($, on) => {
+    await start($, on)
+    await $.prompt.submit({ text: '幫我看一下', context: ['別的 mod 附的'] } as any)
+    const context = submittedContexts[submittedContexts.length - 1]!
+    expect(context[0]).toBe('別的 mod 附的')
+    const reminder = context[context.length - 1]!
+    expect(reminder).toContain('Traditional Chinese (Taiwan usage)')
+    expect(reminder).toContain('final answer')
+    expect(reminder).toContain('progress notes between tool calls')
+    expect(reminder).toContain('even when what you read is in English')
   })
 })
 
