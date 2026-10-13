@@ -8,11 +8,18 @@ const MODEL = 'haiku'
 const MAX_LOG = 20
 
 // 摘要區塊的外框，讓它在 band 裡一眼就能認出來；只框自己畫的部分，
-// 其他 mod 的內容（rest）留在框外，因為串接順序無法保證這個 mod 在最外層
+// 其他 mod 的內容（rest）留在框外，因為串接順序無法保證這個 mod 在最外層。band 放不下時拿掉（見 hasRoomForBorder）
 const BORDER_STYLE = 'round'
 const BORDER_COLOR = 'suggestion'
 // 外框左右各一格線、一格內距；框內每一列可用的寬度是 bodyColumns 扣掉這些，再扣掉標籤
 const BOX_CHROME_COLUMNS = 4
+// 拿掉外框時改用的左右內距：文字留在跟有框時同一欄（框線一格加內距一格），可用寬度也不變
+const BORDERLESS_PADDING_X = 2
+const BORDER_ROWS = 2
+// band 裡畫在這個框下面的其他 mod 大約佔的列數：gitlab-sync 一列；next-steps 的清單顯示時再加它拿掉空白列後的列數
+// （next:、最多 3 個選項、dismiss）。這個 mod 看不到它們畫了什麼，用估計值判斷
+const GITLAB_ROWS = 1
+const NEXT_STEPS_ROWS = 5
 const LABELS = { goal: '◆ Goal: ', now: '  Now: ', next: '  Next: ', wait: '  Wait: ' }
 // 存進 recap 前的安全上限：真正的截斷在畫框時依寬度做，這裡只防模型偶爾寫出一大段
 const MAX_STORED_COLUMNS = 300
@@ -90,13 +97,17 @@ export const register: Register = on => {
     const { Box, Text } = $.ui.resolve(e)
     const { value: hasNextSteps = false } = await $.state.get(nextStepsActive)
     const nextStep = hasNextSteps ? '' : r.next
-    // 依框的實際寬度截斷；wrap="truncate-end" 留著當保險，寬度算錯時也不會折成兩行
+    // 依框的實際寬度截斷；wrap="truncate-end" 留著當保險，寬度算錯時也不會折成兩行。有沒有外框，可用寬度都一樣
     const innerColumns = e.props.bodyColumns - BOX_CHROME_COLUMNS
     const fit = (label: string, text: string) => clip(text, innerColumns - displayWidth(label))
+    const lineCount = 2 + (nextStep !== '' ? 1 : 0) + (r.waiting !== '' ? 1 : 0)
+    const frame = hasRoomForBorder(e.props.maxRows, lineCount, hasNextSteps)
+      ? { paddingX: 1, borderStyle: BORDER_STYLE, borderColor: BORDER_COLOR }
+      : { paddingX: BORDERLESS_PADDING_X }
 
     return (
       <Box flexDirection="column">
-        <Box flexDirection="column" paddingX={1} borderStyle={BORDER_STYLE} borderColor={BORDER_COLOR}>
+        <Box flexDirection="column" {...frame}>
           <Text wrap="truncate-end">
             <Text color="cyan" bold>{LABELS.goal}</Text>
             <Text>{fit(LABELS.goal, r.goal)}</Text>
@@ -119,6 +130,13 @@ export const register: Register = on => {
       </Box>
     )
   })
+}
+
+// 整排超過 maxRows 時 Claude Code 會把最下面收成「n more」，next-steps 的選項最先被藏起來。
+// next-steps 放不下時先拿掉自己的空白列（next-steps 的 gapRows），那樣還放不下，這個框才拿掉上下框線省兩列；改規則要兩邊一起看
+export function hasRoomForBorder(maxRows: number, lineCount: number, hasNextSteps: boolean): boolean {
+  const rowsBelow = GITLAB_ROWS + (hasNextSteps ? NEXT_STEPS_ROWS : 0)
+  return BORDER_ROWS + lineCount + rowsBelow <= maxRows
 }
 
 // clean-view 停用或載入失敗時，host 不會清掉它寫過的 state（只在 session 結束時整批清），

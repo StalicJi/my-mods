@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { clip, describe as label, parseRecap } from '../hooks/register'
+import { clip, describe as label, hasRoomForBorder, parseRecap } from '../hooks/register'
 
 const BAND = { component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120 } }
 
@@ -236,6 +236,37 @@ describe('where-am-i', () => {
       expect(JSON.stringify(rest)).toContain('band below')
       await ui.unmount()
     }
+  })
+
+  test('估算整排要的列數：外框、框內每一行、gitlab-sync 一列，next-steps 顯示時再加 5 列', () => {
+    // 外框 2 + Goal、Now、Wait 3 + gitlab-sync 1 + next-steps 5 = 11
+    expect(hasRoomForBorder(11, 3, true)).toBe(true)
+    expect(hasRoomForBorder(10, 3, true)).toBe(false)
+    // 沒有 next-steps：外框 2 + Goal、Now、Next、Wait 4 + gitlab-sync 1 = 7
+    expect(hasRoomForBorder(7, 4, false)).toBe(true)
+    expect(hasRoomForBorder(6, 4, false)).toBe(false)
+  })
+
+  test('band 放不下時拿掉外框，文字留在同一欄、照樣依同樣寬度截斷', async ($, on) => {
+    engine(on, '{"goal":"窄視窗也看得到選項","now":"改好了","waiting":"請決定要不要提交","next":"測試"}')
+    on('state.get', { plugin: 'next-steps', key: 'active' }, () => ({ value: { value: true, version: 1 } }))
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+    await $.turn.complete({ reason: 'answer', answer: 'done', durationMs: 1 } as any)
+    await wait()
+
+    const roomy = await $.ui.mount({ plugin: 'where-am-i', surface: 'terminal', ...BAND, props: { ...BAND.props, maxRows: 11 } } as any)
+    const [framed] = ((await roomy.drawn()) as any).children
+    expect(framed.props).toMatchObject({ borderStyle: 'round', paddingX: 1 })
+    await roomy.unmount()
+
+    const tight = await $.ui.mount({ plugin: 'where-am-i', surface: 'terminal', ...BAND, props: { ...BAND.props, maxRows: 10 } } as any)
+    const [plain, rest] = ((await tight.drawn()) as any).children
+    expect(plain.props.borderStyle).toBeUndefined()
+    expect(plain.props.paddingX).toBe(2)
+    expect(JSON.stringify(plain)).toContain('窄視窗也看得到選項')
+    expect(JSON.stringify(plain)).toContain('Wait: 請決定要不要提交')
+    expect(JSON.stringify(rest)).toContain('band below')
+    await tight.unmount()
   })
 
   test('clean-view 的合併框顯示時讓出位置：always 一律讓，whileWorking 只在回合中讓', async ($, on) => {
