@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
+import { gapRows } from '../hooks/register'
+
 const SURFACES = ['terminal', 'desktop'] as const
 
 const wait = () => new Promise(done => (globalThis as any).setTimeout(done, 10))
@@ -142,5 +144,58 @@ describe('active：清單顯示中才是 true，where-am-i 據此讓出 Next:', 
     await wait()
 
     expect(active.value).toBe(false)
+  })
+})
+
+// 畫出來的樹裡有幾個空一列的 Box（marginTop 1）
+function gapCount(node: any): number {
+  if (!node || typeof node !== 'object') return 0
+  const own = node.props?.marginTop === 1 ? 1 : 0
+  return own + ((node.children ?? []) as unknown[]).reduce((sum: number, child) => sum + gapCount(child), 0)
+}
+
+const bandWith = (maxRows: number) => ({ ...BAND, surface: 'terminal', props: { ...BAND.props, maxRows, scroll: { offset: 0, bodyRows: maxRows } } })
+
+describe('band 放不下時拿掉「next:」上面的空白列', () => {
+  test('其他 mod 估 6 列加空白列與清單放得下才空一列', () => {
+    // 兩個建議：next:、兩個選項、dismiss 共 4 列
+    expect(gapRows(11, 4)).toBe(1)
+    expect(gapRows(10, 4)).toBe(0)
+  })
+
+  test('放得下時空一列，放不下時不空', async ($, on) => {
+    engine(on, TWO_SUGGESTIONS)
+    await finishTurn($)
+    await wait()
+
+    const roomy = await $.ui.mount(bandWith(11) as any)
+    expect(gapCount(await roomy.drawn())).toBe(1)
+    await roomy.unmount()
+
+    const tight = await $.ui.mount(bandWith(10) as any)
+    expect(gapCount(await tight.drawn())).toBe(0)
+    // 空白列拿掉了，選項照樣都在
+    expect(await tight.find({ type: 'Button', text: /提交/ })).toBeDefined()
+    expect(await tight.find({ type: 'Button', text: /dismiss/ })).toBeDefined()
+    await tight.unmount()
+  })
+
+  test('產生建議時的「next steps…」也一樣', async ($, on) => {
+    // 跟 engine() 一樣，只是建議一直還沒回來，畫面停在產生中
+    on('turn.complete', () => ({ text: '' }))
+    on('command.list', () => ({ value: [] }))
+    on('model.fork', () => new Promise(() => {}))
+    on('ui.render', () => ({ type: 'engine', ref: 0 }))
+    void finishTurn($)
+    await wait()
+
+    const roomy = await $.ui.mount(bandWith(8) as any)
+    expect(await roomy.find({ type: 'Text', text: /next steps…/ })).toBeDefined()
+    expect(gapCount(await roomy.drawn())).toBe(1)
+    await roomy.unmount()
+
+    const tight = await $.ui.mount(bandWith(7) as any)
+    expect(gapCount(await tight.drawn())).toBe(0)
+    await tight.unmount()
   })
 })

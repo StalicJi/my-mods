@@ -26,6 +26,9 @@ type View =
   | { kind: 'offer'; items: Suggestion[] }
 
 const MAX_SUGGESTIONS = 3
+// band 裡其他 mod 大約佔的列數：where-am-i 的摘要框（清單顯示時它讓出 Next，外框 2 列加 Goal、Now、Wait）5 列，
+// 加上 gitlab-sync 一列。這個 mod 看不到它們畫了什麼，用估計值判斷整排放不放得下
+const OTHER_BAND_ROWS = 6
 const LABEL_MAX = 48
 const PROMPT_MAX = 600
 const SKILL_NAME_MAX = 64
@@ -220,7 +223,7 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="column">
           {below}
-          <Box marginTop={1}>
+          <Box marginTop={gapRows(e.props.maxRows, 1)}>
             <Text dimColor>next steps…</Text>
           </Box>
         </Box>
@@ -228,10 +231,12 @@ export const register: Register = (on, options) => {
     }
 
     const items = view.items
+    // 「next:」、每個選項各一列、dismiss
+    const listRows = 1 + items.length + 1
     return (
       <Box flexDirection="column">
         {below}
-        <Box marginTop={1} />
+        <Box marginTop={gapRows(e.props.maxRows, listRows)} />
         <Text dimColor>next:</Text>
         {items.map((item, index) => (
           <Box key={`s${index}`} marginLeft={2}>
@@ -256,4 +261,10 @@ export const register: Register = (on, options) => {
       </Box>
     )
   })
+}
+
+// 整排超過 maxRows 時 Claude Code 會把最下面收成「n more」，最先被藏起來的就是這裡的選項，
+// 所以放不下時先拿掉上面的空白列。where-am-i 判斷要不要拿掉外框時，把這裡算成沒有空白列，改規則要兩邊一起看
+export function gapRows(maxRows: number, listRows: number): number {
+  return OTHER_BAND_ROWS + 1 + listRows <= maxRows ? 1 : 0
 }
