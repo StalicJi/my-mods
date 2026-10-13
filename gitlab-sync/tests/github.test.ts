@@ -210,12 +210,12 @@ function captureToasts(on: any): string[] {
 }
 
 async function start($: any, on: any) {
-  fakeStatusFiles(on)
+  captureStatus(on)
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: '/work-gh' }))
   on('command.register', (_$: any, e: any) => ({ value: { command: e.name } }))
   on('fs.stat', () => ({ deny: 'ENOENT' }))
-  on('env.get', (_$: any, e: any) => ({ value: e.name === 'GITLAB_TOKEN' ? 'gitlab-token' : e.name === 'HOME' ? TEST_HOME : undefined }))
+  on('env.get', (_$: any, e: any) => ({ value: e.name === 'GITLAB_TOKEN' ? 'gitlab-token' : undefined }))
   on('ui.render', ($: any, e: any) => {
     const { Text } = $.ui.resolve(e)
     return Text({ children: 'engine draws' })
@@ -225,29 +225,19 @@ async function start($: any, on: any) {
 
 const runGithub = async ($: any): Promise<string> => (await $.command.run({ command: 'github', args: '' } as any)).text
 
-// mod 寫給 statusline 腳本的檔（hooks/register.tsx 的 publishStatusLine），測試裡存在記憶體
-const TEST_HOME = '/home/tester'
-const SESSION_ID = 'session-1'
-const statusFiles = new Map<string, string>()
-const ANSI_CODES = /\x1b\[[0-9;]*m/g
+// mod 用 $.ui.status 釘的那一行（hooks/register.tsx 的 publishStatus），測試裡記在記憶體
+const statusCalls: (string | undefined)[] = []
 
-function fakeStatusFiles(on: any) {
-  statusFiles.clear()
-  on('session.id', () => ({ value: SESSION_ID }))
-  on('fs.write', (_$: any, e: any) => {
-    statusFiles.set(e.path, e.text)
+function captureStatus(on: any) {
+  statusCalls.length = 0
+  on('ui.status', (_$: any, e: any) => {
+    statusCalls.push(e.text)
     return { value: undefined }
   })
 }
 
-// 這個 session 那個檔的內容；env.get 替身把 HOME 也回成 token 時路徑前綴不同，只比對結尾
-function statusLineOf(): string {
-  const entry = [...statusFiles].find(([path]) => path.endsWith(`/statusline/${SESSION_ID}.txt`))
-  return entry?.[1] ?? ''
-}
-
 async function footerText(): Promise<string> {
-  return statusLineOf().replace(ANSI_CODES, '')
+  return statusCalls.at(-1) ?? ''
 }
 
 describe('整合情境', () => {

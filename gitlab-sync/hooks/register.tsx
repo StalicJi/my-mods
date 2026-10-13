@@ -1,4 +1,4 @@
-// GitLab Sync：statusline 時間那一行上面（mod 寫檔、statusline 腳本印出）一行顯示目前分支跟遠端差幾個 commit，以及自己開的或指派給自己、還開著的張數（GitLab 分 Task、Issue）；
+// GitLab Sync：statusline 上面釘一行（$.ui.status）顯示目前分支跟遠端差幾個 commit，以及自己開的或指派給自己、還開著的張數（GitLab 分 Task、Issue）；
 // GitLab 與 GitHub 上自己開的、指派給自己的 issue／MR（PR），以及要自己審查的 MR（PR）有新動態時跳 toast；
 // /gitlab、/github 立即檢查並列出該平台的未讀動態，以及那些還開著的項目（在該平台專案的 repo 裡兩者都只算這個專案的）
 import { atom, read, update } from 'claude-code'
@@ -7,7 +7,6 @@ import type { EngineInterface, HttpResponse, Register, Timer } from 'claude-code
 import type { InboxStatus, KindCount, RepoSync } from '../types'
 import { gitlabProjectOf, pollGitlab } from './gitlab'
 import { githubRepoOf, pollGithub } from './github'
-import { ansiLine } from './statusline'
 import {
   clipColumns,
   columnsWidth,
@@ -45,12 +44,8 @@ const MAX_UNREAD = 50
 const MAX_SEEN_IDS = 500
 const TOAST_MS = 10_000
 const TOAST_COLUMNS = 100
-// 這一列交給使用者的 statusline 腳本印在時間那一行上面（10/13 使用者要的位置；mod 能畫的地方都在 statusline 下面）。
-// 每個 session 一個檔，~/.claude/statusline.sh 用 statusline 輸入的 session_id 找檔；檔名格式改了要兩邊一起改
-const STATUS_LINE_DIR = '.claude/gitlab-sync/statusline'
-const STATUS_LINE_SUFFIX = '.txt'
-// 結束的 session 留下的空檔，放超過一天就清掉
-const STATUS_LINE_KEEP_DAYS = 1
+// 各段之間空兩格、不加「·」，跟 Claude Code 的 statusline 一樣（10/13 使用者要求縮短間距）
+const SEGMENT_SEPARATOR = '  '
 // 來源標示前的平台圖示：Nerd Font 收錄的 Font Awesome 圖示（nf-fa-gitlab、nf-fa-github）。
 // 使用者的終端機字型是 MesloLGM Nerd Font Mono，一個圖示佔一格；沒有 Nerd Font 的字型會顯示成方框
 const GITLAB_ICON = '\u{f296}'
@@ -123,6 +118,9 @@ let tickTimer: Timer | undefined
 let runningTick: Promise<void> | null = null
 let lastFetchAt = 0
 let lastBehind: { key: string; behind: number } | null = null
+const PLUGIN_NAME = 'gitlab-sync'
+// 上次送給 $.ui.status 的文字；null 是這次載入還沒送過
+let shownStatus: string | undefined | null = null
 const fetchFailedByRoot = new Map<string, boolean>()
 const runtimes = new Map<Forge, ForgeRuntime>()
 
@@ -167,7 +165,7 @@ async function tick($: EngineInterface, isForced: boolean) {
       await syncInbox($, forge)
     }),
   )
-  await publishStatusLine($)
+  await publishStatus($)
 }
 
 // ── git ───────────────────────────────────────────────
@@ -594,19 +592,18 @@ export const register: Register = (on, options) => {
     startTicking($)
     // 不等它跑完：git fetch 與平台輪詢可能要幾秒，別擋住第一個 prompt
     void runTick($, false).catch(() => {})
-    void removeOldStatusLines($)
     return started
   })
 
   // 列出未讀會標為已讀，則數跟著變
   on('command.run', { command: 'gitlab' }, async $ => {
     const text = await checkNow($, GITLAB)
-    await publishStatusLine($)
+    await publishStatus($)
     return { text }
   })
   on('command.run', { command: 'github' }, async $ => {
     const text = await checkNow($, GITHUB)
-    await publishStatusLine($)
+    await publishStatus($)
     return { text }
   })
 
@@ -617,12 +614,13 @@ export const register: Register = (on, options) => {
     return completed
   })
 
-  // session 結束（含 /clear）就清空自己的檔，statusline 不留舊內容
-  on('session.end', async ($, e, next) => {
-    const ended = await next(e)
-    const path = await statusLinePath($, e.sessionId)
-    if (path !== null) await $.fs.write(path, '').catch(() => {})
-    return ended
+  // 引擎每收到一次 $.ui.status 就把那一行移到最後（2.1.296 執行檔：先 removeNotification 再 addNotification）。
+  // 別的 mod（例如 agent-supervisor）更新自己那一行之後重送一次自己的，這一行才會一直在最下面、緊貼 statusline。
+  // hook 不會在自己發出的呼叫裡再被觸發，所以重送不會繞回來
+  on('ui.status', async ($, e, next) => {
+    const result = await next(e)
+    if (next.origin.plugin !== PLUGIN_NAME && typeof shownStatus === 'string') $.ui.status(shownStatus)
+    return result
   })
 }
 
@@ -632,36 +630,18 @@ async function refreshAfterTurn($: EngineInterface) {
   } catch {
     // 下一次計時器還會再更新
   }
-  await publishStatusLine($)
+  await publishStatus($)
 }
 
-// ── statusline ────────────────────────────────────────
+// ── 狀態列 ────────────────────────────────────────────
 
-async function statusLineDir($: EngineInterface): Promise<string | null> {
-  const home = await $.env.get('HOME')
-  return home ? `${home}/${STATUS_LINE_DIR}` : null
-}
-
-async function statusLinePath($: EngineInterface, sessionId: string): Promise<string | null> {
-  const dir = await statusLineDir($)
-  return dir === null ? null : `${dir}/${sessionId}${STATUS_LINE_SUFFIX}`
-}
-
-// 每一輪都寫，內容沒變也寫：腳本看檔案多久沒更新，判斷這個 session 的 mod 還在不在跑，停用或當掉後不留舊內容。
-// session id 每次重新問：/clear 之後換了新的 id
-async function publishStatusLine($: EngineInterface) {
-  try {
-    const path = await statusLinePath($, await $.session.id())
-    if (path === null) return
-    const segments = footerSegments(await read($, repoSync), await read($, gitlabInbox), await read($, githubInbox))
-    await $.fs.write(path, ansiLine(segments))
-  } catch {
-    // 寫不進去就等下一輪
-  }
-}
-
-async function removeOldStatusLines($: EngineInterface) {
-  const dir = await statusLineDir($)
-  if (dir === null) return
-  await runCommand($, ['find', dir, '-name', `*${STATUS_LINE_SUFFIX}`, '-mtime', `+${STATUS_LINE_KEEP_DAYS}`, '-delete'], GIT_TIMEOUT_MS)
+// 10/13 使用者要這一列在 agent-supervisor 那一行下面、statusline 上面，改用跟它一樣的 $.ui.status 釘選（不改 statusline 腳本）。
+// Claude Code 會在前面加「⚠ gitlab-sync:」、整行同一個顏色，ANSI 色碼不會被解讀而是印成亂碼（實測），所以只送純文字
+async function publishStatus($: EngineInterface) {
+  const segments = footerSegments(await read($, repoSync), await read($, gitlabInbox), await read($, githubInbox))
+  const text = segments.length === 0 ? undefined : segments.map(segment => segment.text).join(SEGMENT_SEPARATOR)
+  // 沒變就不送，免得每一輪都重畫；null 代表這次載入還沒送過（熱重載後畫面上可能還留著舊的，要送一次蓋掉）
+  if (text === shownStatus) return
+  shownStatus = text
+  $.ui.status(text)
 }
