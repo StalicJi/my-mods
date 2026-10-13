@@ -5,6 +5,9 @@ import type { GithubItem } from '../hooks/github'
 import { footerSegments } from '../hooks/register'
 import type { InboxStatus, RepoSync } from '../types'
 
+// 來源標示含 Nerd Font 圖示（hooks/register.tsx 的 GITLAB_ICON、GITHUB_ICON）
+const GITLAB_MARK = '\u{f296} GitLab'
+const GITHUB_MARK = '\u{f09b} GitHub'
 const GITLAB_URL = 'http://gitlab.test'
 const OPTIONS = { options: { gitlabUrl: GITLAB_URL } }
 const T0 = Date.parse('2026-10-08T03:00:00.000Z')
@@ -125,27 +128,25 @@ describe('底部那一列', () => {
 
   test('在 GitHub repo 裡只顯示 GitHub 的新動態、通知暫停與 Issue 張數；GitLab 的都不顯示', () => {
     expect(texts(GITHUB_REPO, { ...NO_INBOX, openCounts: [{ kind: 'Task', count: 4 }, { kind: 'Issue', count: 9 }] }, { unreadCount: 1, problem: null, openCounts: [{ kind: 'Issue', count: 2 }] })).toEqual([
-      'GitHub',
-      '⎇ main',
+      GITHUB_MARK,
       '✓ 已同步',
       'GitHub 1 則新動態（/github）',
       'Issue 2 張（/github）',
     ])
-    expect(texts(GITHUB_REPO, NO_INBOX, { ...NO_INBOX, problem: 'HTTP 401' })).toEqual(['GitHub', '⎇ main', '✓ 已同步', 'GitHub 通知暫停（/github 看原因）'])
+    expect(texts(GITHUB_REPO, NO_INBOX, { ...NO_INBOX, problem: 'HTTP 401' })).toEqual([GITHUB_MARK, '✓ 已同步', 'GitHub 通知暫停（/github 看原因）'])
     // 截圖的情境：不在公司內網連不到 GitLab，GitHub repo 的底部那一列不該出現「GitLab 通知暫停」
-    expect(texts(GITHUB_REPO, { ...NO_INBOX, problem: '連不上' }, { ...NO_INBOX, openCounts: [{ kind: 'Issue', count: 0 }] })).toEqual(['GitHub', '⎇ main', '✓ 已同步', 'Issue 0 張（/github）'])
-    expect(texts(GITHUB_REPO, { ...NO_INBOX, unreadCount: 3 }, NO_INBOX)).toEqual(['GitHub', '⎇ main', '✓ 已同步'])
+    expect(texts(GITHUB_REPO, { ...NO_INBOX, problem: '連不上' }, { ...NO_INBOX, openCounts: [{ kind: 'Issue', count: 0 }] })).toEqual([GITHUB_MARK, '✓ 已同步', 'Issue 0 張（/github）'])
+    expect(texts(GITHUB_REPO, { ...NO_INBOX, unreadCount: 3 }, NO_INBOX)).toEqual([GITHUB_MARK, '✓ 已同步'])
   })
 
   test('在 GitLab repo 裡只顯示 GitLab 的新動態、通知暫停與張數（Task、Issue 分開）；GitHub 的都不顯示', () => {
     expect(texts(GITLAB_REPO, { ...NO_INBOX, openCounts: [{ kind: 'Task', count: 0 }, { kind: 'Issue', count: 0 }] }, { ...NO_INBOX, unreadCount: 2, openCounts: [{ kind: 'Issue', count: 5 }] })).toEqual([
-      'GitLab',
-      '⎇ main',
+      GITLAB_MARK,
       '✓ 已同步',
       'Task 0 張',
       'Issue 0 張（/gitlab）',
     ])
-    expect(texts(GITLAB_REPO, { ...NO_INBOX, unreadCount: 1 }, { ...NO_INBOX, problem: 'HTTP 401' })).toEqual(['GitLab', '⎇ main', '✓ 已同步', 'GitLab 1 則新動態（/gitlab）'])
+    expect(texts(GITLAB_REPO, { ...NO_INBOX, unreadCount: 1 }, { ...NO_INBOX, problem: 'HTTP 401' })).toEqual([GITLAB_MARK, '✓ 已同步', 'GitLab 1 則新動態（/gitlab）'])
   })
 
   test('不在 repo 的目錄沒有所屬平台：兩個平台的新動態與通知暫停都顯示', () => {
@@ -262,7 +263,7 @@ describe('整合情境', () => {
 
     await start($, on)
     await clock.advance(0)
-    expect(await footerText($)).toContain('GitHub  ⎇ main  ✓ 已同步  Issue 1 張（/github）')
+    expect(await footerText($)).toContain(`${GITHUB_MARK}  ✓ 已同步  Issue 1 張（/github）`)
 
     timeline = [commented(7001, OCTO, '我這邊也重現了', T0 + 60_000)]
     await clock.advance(3 * 60_000)
@@ -344,7 +345,7 @@ describe('整合情境', () => {
     await start($, on)
     await clock.advance(0)
     const footer = await footerText($)
-    expect(footer).toContain('GitHub  ⎇ main  ✓ 已同步')
+    expect(footer).toContain(`${GITHUB_MARK}  ✓ 已同步`)
     expect(footer).not.toContain('GitHub 通知暫停')
     expect(footer).not.toContain('Issue ')
     expect(toasts.some(text => text.startsWith('GitHub'))).toBe(false)

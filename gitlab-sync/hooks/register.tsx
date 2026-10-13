@@ -46,6 +46,10 @@ const TOAST_MS = 10_000
 const TOAST_COLUMNS = 100
 // 各段之間空兩格、不加「·」，跟 Claude Code 的 statusline 一樣（10/13 使用者要求縮短間距）
 const SEGMENT_SEPARATOR = '  '
+// 來源標示前的平台圖示：Nerd Font 收錄的 Font Awesome 圖示（nf-fa-gitlab、nf-fa-github）。
+// 使用者的終端機字型是 MesloLGM Nerd Font Mono，一個圖示佔一格；沒有 Nerd Font 的字型會顯示成方框
+const GITLAB_ICON = '\u{f296}'
+const GITHUB_ICON = '\u{f09b}'
 // 背景跑的 git 不能停在密碼提示，連不上就直接失敗
 const GIT_ENV = { GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' }
 const EMPTY_INBOX: InboxStatus = { unreadCount: 0, problem: null, openCounts: null }
@@ -472,11 +476,10 @@ export function repoReport(repo: RepoSync | null): string {
 export function footerSegments(repo: RepoSync | null, gitlabStatus: InboxStatus, githubStatus: InboxStatus = EMPTY_INBOX): Segment[] {
   const segments: Segment[] = []
   if (repo !== null) {
+    // 分支名稱與未提交的檔案數不顯示：使用者的 statusline 已經有（~/.claude/statusline.sh 的「main ±7」），10/13 依使用者要求拿掉
     segments.push(remoteSegment(repo))
-    segments.push({ text: `⎇ ${repo.branch}${repo.isDetached ? '（detached）' : ''}`, isDim: true })
     const sync = syncSegment(repo)
     if (sync) segments.push(sync)
-    if (repo.dirtyCount > 0) segments.push({ text: `${repo.dirtyCount} 個檔案未提交`, isDim: true })
   }
   const statuses = [
     { forge: GITLAB, status: gitlabStatus },
@@ -503,9 +506,9 @@ export function footerSegments(repo: RepoSync | null, gitlabStatus: InboxStatus,
 // 這個 repo 的遠端在哪裡：設定的 GitLab 用 Claude 橘色；GitHub 用主題的文字色（深色主題是白色，淺色主題自動變黑，不會白字白底）；
 // 沒有遠端（本機）與其他主機（直接寫主機名稱）用暗色
 export function remoteSegment(repo: RepoSync): Segment {
-  if (repo.gitlabProject !== null) return { text: 'GitLab', color: 'claude' }
+  if (repo.gitlabProject !== null) return { text: `${GITLAB_ICON} GitLab`, color: 'claude' }
   if (repo.remoteHost === null) return { text: '本機', isDim: true }
-  if (repo.remoteHost === 'github.com') return { text: 'GitHub', color: 'text' }
+  if (repo.remoteHost === 'github.com') return { text: `${GITHUB_ICON} GitHub`, color: 'text' }
   return { text: repo.remoteHost, isDim: true }
 }
 
