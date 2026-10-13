@@ -5,6 +5,7 @@
 | mod | 用途 |
 | --- | --- |
 | `clean-view` | 工具呼叫收成一行淡色摘要（Edit、Write、Bash 與錯誤訊息照常顯示），計畫清單顯示在輸入框上方；`/clean` 切換 |
+| `next-steps` | 回合結束後建議下一步（繁體中文版，fork 自 anthropics/claude-plugins-community，Apache 2.0） |
 | `gitlab-sync` | 分支跟遠端的同步狀態與還開著的張數（GitLab 的 Task、Issue 分開計數）；GitLab 與 GitHub 上自己的 issue／MR（PR）有新動態時通知，`/gitlab`、`/github` 查看 |
 | `agent-supervisor` | 監控子代理、回報的任務與依賴、可能的阻塞與下一步建議；`/supervisor` 開關面板，說明見 [agent-supervisor/README.md](agent-supervisor/README.md) |
 
@@ -16,6 +17,7 @@ clone 到固定的資料夾，再把那個資料夾加成 marketplace。這樣 C
 git clone <這個 repo 的網址> ~/.claude/mods-marketplaces/my-mods
 claude plugin marketplace add ~/.claude/mods-marketplaces/my-mods
 claude plugin install clean-view@my-mods
+claude plugin install next-steps@my-mods
 claude plugin install gitlab-sync@my-mods
 claude plugin install agent-supervisor@my-mods
 ```
@@ -61,4 +63,4 @@ $EDITOR ~/.config/git/private-patterns
 
 ## 授權
 
-`clean-view` 與 `gitlab-sync` 採用根目錄的 [MIT License](LICENSE)。
+`clean-view` 與 `gitlab-sync` 採用根目錄的 [MIT License](LICENSE)。`next-steps`（Apache 2.0）是 fork，依它資料夾裡的 LICENSE。

@@ -1,0 +1,33 @@
+{
+  "name": "next-steps",
+  "version": "1.0.0-tw.1",
+  "description": "繁體中文版（fork 自 claude-plugins-community 1.0.0）：每個回合結束後，在輸入框上方建議最多三個下一步 prompt，一律用繁體中文。按 1、2、3 填入輸入框當草稿，0 關閉。",
+  "author": {
+    "name": "Thariq Shihipar"
+  },
+  "license": "MIT",
+  "keywords": [
+    "suggestions",
+    "next-steps",
+    "prompt",
+    "function-hooks",
+    "ui"
+  ],
+  "userConfig": {
+    "minAnswerChars": {
+      "type": "number",
+      "title": "Shortest answer to suggest after",
+      "description": "Skip suggestions after answers shorter than this many characters.",
+      "required": false,
+      "default": 80
+    },
+    "suggestSkills": {
+      "type": "boolean",
+      "title": "Suggest skills and slash commands",
+      "description": "Tell the suggester which skills and slash commands this session has, so a suggestion can be one of them.",
+      "required": false,
+      "default": true
+    }
+  },
+  "types": "./types/index.d.ts"
+}
