@@ -123,6 +123,8 @@ let tickTimer: Timer | undefined
 let runningTick: Promise<void> | null = null
 let lastFetchAt = 0
 let lastBehind: { key: string; behind: number } | null = null
+// 這次載入後寫過 statusline 的檔沒有；還沒寫過時，第一輪先用本機狀態寫一次（見 tick）
+let hasPublishedStatusLine = false
 const fetchFailedByRoot = new Map<string, boolean>()
 const runtimes = new Map<Forge, ForgeRuntime>()
 
@@ -155,7 +157,13 @@ async function tick($: EngineInterface, isForced: boolean) {
   const now = await $.clock.now()
   const shouldFetch = isForced || now - lastFetchAt >= FETCH_INTERVAL_MS
   if (shouldFetch) lastFetchAt = now
-  await refreshRepo($, shouldFetch, now)
+  // 載入後的第一輪先用本機 git 狀態（加上 $.state 裡上次輪詢的結果）寫一次檔：連不上遠端時 fetch 要等到逾時
+  // （最多 30 秒），平台輪詢也要等，statusline 不必空著等它們；跑完下面的 fetch 與輪詢再寫一次
+  if (!hasPublishedStatusLine) {
+    await refreshRepo($, 'preview', now)
+    await publishStatusLine($)
+  }
+  await refreshRepo($, shouldFetch ? 'fetch' : 'local', now)
   // 兩個平台同時查：一邊連不上等逾時，不拖住另一邊
   await Promise.all(
     FORGES.map(async forge => {
@@ -182,7 +190,11 @@ async function git($: EngineInterface, cwd: string, args: readonly string[], tim
   }
 }
 
-async function refreshRepo($: EngineInterface, shouldFetch: boolean, now: number) {
+// 讀 repo 狀態的方式：fetch 先抓遠端再算；local 只讀本機；preview 也只讀本機，但不當成「遠端多了新 commit」提醒的
+// 比較基準：它只是第一輪先畫給 statusline 看的，fetch 完的那次才算第一次觀察，跟原本一樣只記下來、不提醒
+type RepoRefresh = 'fetch' | 'local' | 'preview'
+
+async function refreshRepo($: EngineInterface, how: RepoRefresh, now: number) {
   const root = await git($, await $.session.cwd(), ['rev-parse', '--show-toplevel'])
   if (root === null) return setRepo($, null)
   const branchName = await git($, root, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
@@ -192,7 +204,7 @@ async function refreshRepo($: EngineInterface, shouldFetch: boolean, now: number
   if (branch === null) return setRepo($, null)
 
   const upstream = isDetached ? null : await resolveUpstream($, root, branch)
-  if (upstream !== null && shouldFetch) {
+  if (upstream !== null && how === 'fetch') {
     const fetched = await fetchUpstream($, root, upstream, now)
     if (fetched !== 'skipped') fetchFailedByRoot.set(root, fetched === 'failed')
   }
@@ -201,7 +213,7 @@ async function refreshRepo($: EngineInterface, shouldFetch: boolean, now: number
   const dirtyCount = status ? status.split('\n').filter(line => line !== '').length : 0
   const remote = await resolveRemote($, root, upstream)
 
-  notifyNewRemoteCommits($, `${root}\n${branch}\n${upstream}`, upstream, behind)
+  if (how !== 'preview') notifyNewRemoteCommits($, `${root}\n${branch}\n${upstream}`, upstream, behind)
   await setRepo($, { branch, isDetached, upstream, ahead, behind, dirtyCount, isFetchFailed: fetchFailedByRoot.get(root) ?? false, ...remote })
 }
 
@@ -635,7 +647,7 @@ export const register: Register = (on, options) => {
 
 async function refreshAfterTurn($: EngineInterface) {
   try {
-    await refreshRepo($, false, await $.clock.now())
+    await refreshRepo($, 'local', await $.clock.now())
   } catch {
     // 下一次計時器還會再更新
   }
@@ -657,6 +669,7 @@ async function statusLinePath($: EngineInterface, sessionId: string): Promise<st
 // 每一輪都寫，內容沒變也寫：腳本看檔案多久沒更新，判斷這個 session 的 mod 還在不在跑，停用或當掉後不留舊內容。
 // session id 每次重新問：/clear 之後換了新的 id
 async function publishStatusLine($: EngineInterface) {
+  hasPublishedStatusLine = true
   try {
     const path = await statusLinePath($, await $.session.id())
     if (path === null) return

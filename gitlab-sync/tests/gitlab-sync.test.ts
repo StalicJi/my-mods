@@ -310,7 +310,8 @@ describe('文字與畫面', () => {
 // ── 整合情境：模擬 engine、git 與 GitLab ─────────────────────
 
 // remotes：remote 名稱對網址；沒給時 git remote get-url 失敗，等於不在 GitLab 專案裡
-type FakeRepo = { root: string; branch: string; upstream: string; counts: string; status: string; remotes?: Record<string, string> }
+// fetch 給了就等它 resolve 才回應 git fetch，用來模擬連不上遠端、要等到逾時的 fetch
+type FakeRepo = { root: string; branch: string; upstream: string; counts: string; status: string; remotes?: Record<string, string>; fetch?: () => Promise<void> }
 // 鑰匙圈裡的 token 可以中途換掉；reads 記下每次 security 指令的 argv
 type FakeKeychain = { token: string | null; reads: string[][] }
 // route 回傳 UNAUTHORIZED 代表 GitLab 拒絕這個 token（HTTP 401）
@@ -350,7 +351,7 @@ function fakeCommands(on: any, repo: () => FakeRepo, keychain: FakeKeychain = { 
     if (args.includes('@{upstream}')) return ok(current.upstream)
     if (args.includes('--git-path')) return ok(`${current.root}/.git/FETCH_HEAD`)
     if (args[0] === 'symbolic-ref') return ok(current.branch)
-    if (args[0] === 'fetch') return ok('')
+    if (args[0] === 'fetch') return current.fetch === undefined ? ok('') : current.fetch().then(() => ok(''))
     if (args[0] === 'rev-list') return ok(current.counts)
     if (args[0] === 'status') return ok(current.status)
     if (args[0] === 'remote' && args[1] === 'get-url') {
@@ -920,6 +921,31 @@ describe('整合情境', () => {
     await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1 } as any)
     await clock.advance(0)
     expect(await footerText()).toContain('↑1 ↓2 分岔')
+  })
+
+  test('第一輪先用本機 git 狀態寫檔，不等 git fetch 跑完；fetch 完再更新，第一次 fetch 的結果照舊不跳新 commit 提醒', OPTIONS, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    const toasts = captureToasts(on)
+    on('env.get', () => ({ value: 'test-token' }))
+    let behind = 0
+    let finishFetch = () => {}
+    const fetching = new Promise<void>(resolve => {
+      finishFetch = resolve
+    })
+    fakeCommands(on, () => ({ root: '/work-r', branch: 'develop', upstream: 'origin/develop', counts: `0\t${behind}`, status: '', fetch: () => fetching }))
+    fakeGitlab(on, path => (path === '/user' ? ME : []))
+
+    await start($, on)
+    await clock.advance(0)
+    // fetch 還卡著（連不上遠端時要等到逾時，最多 30 秒），statusline 已經有本機狀態
+    expect(await footerText()).toContain('本機  ✓ 已同步')
+
+    behind = 2
+    finishFetch()
+    await clock.advance(0)
+    expect(await footerText()).toContain('↓2 待 pull')
+    expect(toasts.some(text => text.includes('新 commit'))).toBe(false)
   })
 
   test('這台電腦沒設定 GitLab 網址：GitLab 部分整個不顯示、不讀 token、不連線，/gitlab 說明怎麼設定', async ($, on) => {
