@@ -17,7 +17,7 @@ const MAX_ERROR_LINES = 4
 // 計畫清單的排版
 const BAR_WIDTH = 12
 const BAR_COLUMNS = BAR_WIDTH + 2 // 進度條後面空兩格再接狀態字
-// 影片 1:53～1:56 的 Working 條是一顆彗星：頭最亮，後面四格一格比一格淡，融進灰色底
+// 影片 1:53～1:56 的進行中（影片寫 Working）條是一顆彗星：頭最亮，後面四格一格比一格淡，融進灰色底
 const COMET_FADE = [1, 0.7, 0.45, 0.25, 0.1]
 // 影片的主色：橘、粉紅、紫、藍。彗星顏色隨時間在這幾個顏色之間來回變化
 const ORANGE = '#f79a4f'
@@ -25,10 +25,10 @@ const PINK = '#ec4f8f'
 const ACCENT_COLORS = [ORANGE, PINK, '#b45ce6', '#6f7df2']
 const TITLE_MARK = '✳ '
 const TITLE_COLOR = ORANGE
-const ELAPSED_COLUMNS = 8 // 「59m 59s」寬 7，再空一格
+const ELAPSED_COLUMNS = 10 // 「1小時05分」寬 9，再空一格
 const COMET_COLOR_HALF_PERIOD_FRAMES = 15 // 從橘變到藍約 3 秒
 const MARK_COLUMNS = 4 // 「  ✓ 」
-const STATUS_COLUMNS = 8 // 「Working」寬 7
+const STATUS_COLUMNS = 7 // 「進行中」寬 6，再空一格
 const MIN_TITLE_COLUMNS = 12
 const BOX_CHROME_COLUMNS = 4 // 外框左右各一格線、一格內距
 const BOX_BORDER_ROWS = 2
@@ -39,7 +39,7 @@ const GITLAB_FRAMED_ROWS = 3
 const COMBINED_BOX_FRAME = { paddingX: 1, borderStyle: 'round', borderColor: 'suggestion' } as const
 // 拿掉框時的左右內距：框線一格加內距一格的位置，文字留在同一欄
 const UNFRAMED_PADDING_X = 2
-const PLAN_HEADER_ROWS = 2 // 整體進度列與「Plan:」標題列
+const PLAN_HEADER_ROWS = 2 // 整體進度列與「計畫：」標題列
 const PERCENT_COLUMNS = 5 // 「 100%」
 const MIN_OVERALL_BAR_WIDTH = 6
 // 影片 1:53～1:56：整體長條填滿的那段有一道較亮的光，約兩格寬，往右掃到填滿處尾端後停一下再從頭來。
@@ -59,7 +59,7 @@ const BAR_CELL = '▆'
 const DONE_GRADIENT = { from: '#2c9a52', to: '#9ee6b4' }
 // 整體長條已完成那段的填色：左邊橘、填滿處的尾端粉紅
 const OVERALL_FILL_GRADIENT = { from: ORANGE, to: PINK }
-// Working 狀態字與整體百分比的顏色
+// 「進行中」狀態字與整體百分比的顏色
 const WORKING_COLOR = PINK
 // 空的部分是灰色底；暫停時彗星停住、改成淺灰
 const PAUSED_COLOR = '#8a8a94'
@@ -75,9 +75,12 @@ const tick = atom({ plugin: 'clean-view', key: 'tick' } as const, 0)
 const turnClock = atom({ plugin: 'clean-view', key: 'turnClock' } as const, null as TurnClock | null)
 // where-am-i 讀這個值決定要不要讓出位置（where-am-i/hooks/register.tsx 的 cleanViewCombinedBox），改名要兩邊一起改
 const combinedBox = atom({ plugin: 'clean-view', key: 'combinedBox' } as const, 'hidden' as CombinedBoxMode)
-// where-am-i 擁有的摘要，合併框讀來顯示 Goal／Now／Wait
+// where-am-i 擁有的摘要，合併框讀來顯示目標、目前、等你
 const whereAmIRecap = { plugin: 'where-am-i', key: 'recap' } as const
 const whereAmILive = { plugin: 'where-am-i', key: 'live' } as const
+
+// 看畫面的人讀的語言；計畫工具的說明、主對話的計畫指示與子代理的語言要求共用，換語言只改這裡
+const READER_LANGUAGE = 'Traditional Chinese (Taiwan usage)'
 
 const PLAN_SCHEMA = {
   type: 'object',
@@ -88,7 +91,7 @@ const PLAN_SCHEMA = {
       items: {
         type: 'object',
         properties: {
-          title: { type: 'string', description: 'A short phrase, in the language you reply in.' },
+          title: { type: 'string', description: `A short phrase in ${READER_LANGUAGE}; keep code identifiers, commands and paths as they are.` },
           status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] },
         },
         required: ['title', 'status'],
@@ -101,10 +104,7 @@ const PLAN_SCHEMA = {
 const PLAN_TOOL_DESCRIPTION =
   'Show the person a checklist of your plan above their prompt; they see it instead of your tool calls. ' +
   'Send the whole list every time: it replaces the previous one. Keep exactly one step in_progress while you work. ' +
-  'Step titles are short phrases (about 20 CJK or 40 Latin characters at most) in the language you reply in.'
-
-// 看畫面的人讀的語言；主對話的計畫指示與子代理的語言要求共用，換語言只改這裡
-const READER_LANGUAGE = 'Traditional Chinese (Taiwan usage)'
+  `Step titles are short phrases (about 20 CJK characters at most) in ${READER_LANGUAGE}, keeping code identifiers, commands and paths as they are.`
 
 // 這個環境的主對話沒有 TodoWrite／TaskCreate，計畫清單只能靠模型主動回報，所以要在 system prompt 交代。
 // 最後一行的語言要求：工具呼叫收成一行後，畫面上最顯眼的是工具之間的進度說明，
@@ -115,6 +115,7 @@ const PLAN_INSTRUCTIONS = [
   `For a task of three or more steps, call ${PLAN_TOOL} before starting, the first step in_progress and the rest pending.`,
   'Call it again as each step finishes, moving in_progress to the next one, and mark every step completed when the work is done.',
   'Skip it for questions you answer directly and for tasks of one or two steps.',
+  `Write the step titles in ${READER_LANGUAGE}.`,
   `Write the progress notes between tool calls, and any status update you give in reply to a system reminder, in ${READER_LANGUAGE} even when your thinking or the reminder is in English; keep code identifiers, commands and paths as they are.`,
 ].join('\n')
 
@@ -142,9 +143,9 @@ type RowStyle = {
 }
 
 const ROW_STYLE: Record<StepDisplay, RowStyle> = {
-  completed: { mark: '✓', markColor: 'success', isMarkDim: false, isTextBold: false, isTextDim: true, label: 'Done', isLabelBold: false },
-  running: { mark: '▸', isMarkDim: false, isTextBold: true, isTextDim: false, label: 'Working', labelColor: WORKING_COLOR, isLabelBold: true },
-  paused: { mark: '▸', isMarkDim: true, isTextBold: false, isTextDim: false, label: 'Paused', isLabelBold: false },
+  completed: { mark: '✓', markColor: 'success', isMarkDim: false, isTextBold: false, isTextDim: true, label: '完成', isLabelBold: false },
+  running: { mark: '▸', isMarkDim: false, isTextBold: true, isTextDim: false, label: '進行中', labelColor: WORKING_COLOR, isLabelBold: true },
+  paused: { mark: '▸', isMarkDim: true, isTextBold: false, isTextDim: false, label: '暫停', isLabelBold: false },
   pending: { mark: '○', isMarkDim: true, isTextBold: false, isTextDim: true, label: '—', isLabelBold: false },
 }
 
@@ -227,12 +228,12 @@ export const register: Register = on => {
 
   // 自己回答，不呼叫 next：這個工具沒有實際執行的東西，也就不會跳權限確認
   on('tool.call', { tool: PLAN_TOOL }, async ($, e) => {
-    if (e.agentId) return { result: 'Ignored: only the main conversation updates the plan.' }
+    if (e.agentId) return { result: '略過：只有主對話會更新計畫。' }
     const steps = parseSteps((e as { steps?: unknown }).steps)
-    if (steps === null) return { deny: 'steps must be an array of { title, status } with status pending, in_progress or completed.' }
+    if (steps === null) return { deny: 'steps 必須是 { title, status } 的陣列，status 只能是 pending、in_progress 或 completed。' }
     await update($, plan, () => steps)
     await refreshPlanBand($)
-    return { result: `Plan shown: ${countCompleted(steps)}/${steps.length} completed.` }
+    return { result: `已顯示計畫：完成 ${countCompleted(steps)}／${steps.length} 步。` }
   })
 
   // 上一份計畫已全部完成才清掉；還沒做完的留著，Claude 可能下一輪接著做。
@@ -311,7 +312,7 @@ export const register: Register = on => {
     )
   })
 
-  // 計畫顯示時畫合併框：where-am-i 的 Goal／Now／Wait 加上計畫清單（Next 跟計畫重複所以不放）
+  // 計畫顯示時畫合併框：where-am-i 的目標、目前、等你加上計畫清單（下一步跟計畫重複所以不放）
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const rest = await next(e) // 其他 mod 與 Claude Code 自己畫的內容保留在下面
     const mode = await read($, combinedBox)
@@ -344,7 +345,7 @@ export const register: Register = on => {
           )}
           {summary?.now && (
             <Text wrap="truncate-end">
-              <Text dimColor>{'  Now: '}</Text>
+              <Text dimColor>{'  目前：'}</Text>
               <Text>{summary.now}</Text>
             </Text>
           )}
@@ -364,8 +365,8 @@ export const register: Register = on => {
               {view.overall.percent}
             </Text>
           </Box>
-          {/* 標籤跟 Now／Wait 一樣縮排；完成幾步看上面的 Step x of y，這裡不重複 */}
-          <Text dimColor>{'  Plan:'}</Text>
+          {/* 標籤跟「目前」「等你」一樣縮排；完成幾步看上面的「步驟 x／y」，這裡不重複 */}
+          <Text dimColor>{'  計畫：'}</Text>
           {view.rows.map(row => (
             <Box flexDirection="row">
               <Box width={view.titleColumns}>
@@ -390,7 +391,7 @@ export const register: Register = on => {
               )}
             </Box>
           ))}
-          {summary?.waiting && <Text color="yellow" wrap="truncate-end">{`  Wait: ${summary.waiting}`}</Text>}
+          {summary?.waiting && <Text color="yellow" wrap="truncate-end">{`  等你：${summary.waiting}`}</Text>}
         </Box>
         {below}
       </Box>
@@ -414,7 +415,7 @@ export function isCombinedBoxShown(mode: CombinedBoxMode, isWorking: boolean) {
   return mode === 'always' || (mode === 'whileWorking' && isWorking)
 }
 
-// 計畫區塊上方、框線以外的列數：標題列、Now、Wait；跟 JSX 裡畫哪些列要一致
+// 計畫區塊上方、框線以外的列數：標題列、目前、等你；跟 JSX 裡畫哪些列要一致
 function rowsAbovePlan(title: TitleRow | null, summary: RecapSummary | null) {
   return (title ? 1 : 0) + (summary?.now ? 1 : 0) + (summary?.waiting ? 1 : 0)
 }
@@ -427,7 +428,7 @@ export function rowsOfGitlabLine(rest: RenderNode): number {
   return props?.borderStyle !== undefined ? GITLAB_FRAMED_ROWS : 1
 }
 
-// 合併框整個佔幾列：框線、計畫上方的標題列與 Now／Wait、整體進度與「Plan:」、計畫各列
+// 合併框整個佔幾列：框線、計畫上方的標題列與目前、等你、整體進度與「計畫：」、計畫各列
 export function combinedBoxRows(rowsAbove: number, planRowCount: number, isFramed: boolean): number {
   return (isFramed ? BOX_BORDER_ROWS : 0) + rowsAbove + PLAN_HEADER_ROWS + planRowCount
 }
@@ -483,9 +484,9 @@ export function formatElapsed(ms: number): string {
   const hours = Math.floor(totalSeconds / 3600)
   const minutes = Math.floor((totalSeconds % 3600) / 60)
   const seconds = totalSeconds % 60
-  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, '0')}m`
-  if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, '0')}s`
-  return `${seconds}s`
+  if (hours > 0) return `${hours}小時${String(minutes).padStart(2, '0')}分`
+  if (minutes > 0) return `${minutes}分${String(seconds).padStart(2, '0')}秒`
+  return `${seconds}秒`
 }
 
 // 超過寬度時依顯示寬度截斷，補「…」；中文一個字算兩格
@@ -509,7 +510,7 @@ export function planView(steps: readonly PlanStep[], options: PlanViewOptions) {
   const stepRows = Math.min(MAX_STEP_ROWS, Math.max(MIN_STEP_ROWS, options.rows - PLAN_HEADER_ROWS))
   const rows = planRows(steps, stepRows, options.isWorking)
   const layout = planLayout(rows, options.columns)
-  // 標籤欄也要放得下整體進度列的「  Step x of y」，不然標籤會換行、多出一列
+  // 標籤欄也要放得下整體進度列的「  步驟 x／y」，不然標籤會換行、多出一列
   const titleColumns = Math.max(layout.titleColumns, displayWidth(`  ${overallLabel(steps)}`) + 1)
   return {
     ...layout,
@@ -523,7 +524,7 @@ export function planView(steps: readonly PlanStep[], options: PlanViewOptions) {
   }
 }
 
-// 影片的整體進度列：Step x of y、一條長進度條、百分比。x 是進行中的那一步，沒有進行中時是第一個還沒完成的步驟。
+// 影片的整體進度列：步驟 x／y（影片寫 Step x of y）、一條長進度條、百分比。x 是進行中的那一步，沒有進行中時是第一個還沒完成的步驟。
 // 百分比只算已完成的步驟（步驟內部沒有進度可量）；全部完成時整條變綠
 type OverallBarOptions = { barWidth: number; frame: number; isAnimated: boolean }
 
@@ -550,7 +551,7 @@ export function overallProgress(steps: readonly PlanStep[], options: OverallBarO
 
 export function overallLabel(steps: readonly PlanStep[]) {
   const current = currentStepIndex(steps)
-  return `Step ${(current >= 0 ? current : steps.length - 1) + 1} of ${steps.length}`
+  return `步驟 ${(current >= 0 ? current : steps.length - 1) + 1}／${steps.length}`
 }
 
 // 目前的步驟：進行中的那一步，沒有的話是第一個還沒完成的步驟；全部完成時是 -1

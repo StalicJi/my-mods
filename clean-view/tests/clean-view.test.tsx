@@ -41,12 +41,18 @@ const STEPS = [
 ] as const
 const DONE_STEPS = STEPS.map(step => ({ ...step, status: 'completed' as const }))
 
+// 每次註冊計畫工具時收到的參數（說明與參數格式）
+const toolRegistrations: any[] = []
+
 // 代替 mod 底下的 engine；drawBand 換掉 band 底下的內容（例如串接在裡面的 gitlab-sync 那一段）
 function engine(on: any, drawBand?: ($: any, e: any) => unknown) {
   on('session.start', (_$: any, e: any) => ({ sessionId: 's', cwd: e.cwd }))
   on('session.end', () => ({}))
   on('command.register', () => ({ value: undefined }))
-  on('tool.register', () => ({ value: { tool: PLAN_TOOL } }))
+  on('tool.register', (_$: any, e: any) => {
+    toolRegistrations.push(e)
+    return { value: { tool: PLAN_TOOL } }
+  })
   on('prompt.submit', () => ({ text: '' }))
   on('turn.start', () => ({ turnId: 'turn-1' }))
   on('turn.complete', () => ({ text: '' }))
@@ -70,7 +76,7 @@ function mountBand($: any, props: Partial<typeof BAND_PROPS> = {}, surface: 'ter
 
 async function isBoxDrawn($: any, props: Partial<typeof BAND_PROPS> = {}) {
   const ui = await mountBand($, props)
-  const isDrawn = (await ui.find({ type: 'Text', text: /Plan:$/ })) !== undefined
+  const isDrawn = (await ui.find({ type: 'Text', text: /計畫：$/ })) !== undefined
   await ui.unmount()
   return isDrawn
 }
@@ -106,24 +112,25 @@ describe('clean-view', () => {
     await start($, on)
     const answered = await reportPlan($, STEPS)
     expect((answered as any).deny).toBeUndefined()
+    expect((answered as any).result).toBe('已顯示計畫：完成 1／3 步。')
 
     for (const surface of ['terminal', 'desktop'] as const) {
       const ui = await mountBand($, {}, surface)
       const [framed, rest] = ((await ui.drawn()) as any).children
       expect(framed.props.borderStyle).toBe('round')
-      expect(await ui.find({ type: 'Text', text: /Step 2 of 3$/ })).toBeDefined()
-      expect(await ui.find({ type: 'Text', text: /Plan:$/ })).toBeDefined()
-      expect(await ui.find({ type: 'Text', text: /\d+\/\d+ Done/ })).toBeUndefined() // 跟 Step x of y 重複，已拿掉
+      expect(await ui.find({ type: 'Text', text: /步驟 2／3$/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /計畫：$/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /\d+\/\d+ 完成/ })).toBeUndefined() // 跟「步驟 x／y」重複，已拿掉
       expect(await ui.find({ type: 'Text', text: /^33%$/ })).toBeDefined()
       expect(await ui.find({ type: 'Text', text: /^修改 config\.ts$/ })).toBeDefined()
       expect(await ui.find({ type: 'Text', text: /^▆+$/ })).toBeDefined()
-      expect(await ui.find({ type: 'Text', text: /^Working$/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /^進行中$/ })).toBeDefined()
       expect(JSON.stringify(rest)).toContain('engine draws')
       await ui.unmount()
     }
   })
 
-  test('合併框：where-am-i 的 Goal／Now／Wait 跟計畫畫在一起，不放 Next', async ($, on) => {
+  test('合併框：where-am-i 的目標、目前、等你跟計畫畫在一起，不放下一步', async ($, on) => {
     on('state.get', { plugin: 'where-am-i', key: 'recap' }, () => ({
       value: { value: { goal: '合併兩個框', now: '改好了', waiting: '等你確認', next: '跑測試' }, version: 1 },
     }))
@@ -140,7 +147,7 @@ describe('clean-view', () => {
     expect(findTitle(await ui.drawn()).props.color).toBe('#f79a4f') // 標題是橘色
     expect(inside).not.toContain('Goal:')
     expect(inside).toContain('執行：跑測試') // Now 用即時狀態，比摘要新
-    expect(inside).toContain('Wait: 等你確認')
+    expect(inside).toContain('等你：等你確認')
     expect(inside).not.toContain('Next')
     await ui.unmount()
   })
@@ -155,13 +162,13 @@ describe('clean-view', () => {
     await reportPlan($, STEPS)
     await clock.advance(21_000)
     const working = await mountBand($)
-    expect(await working.find({ type: 'Text', text: /^21s$/ })).toBeDefined()
+    expect(await working.find({ type: 'Text', text: /^21秒$/ })).toBeDefined()
     await working.unmount()
 
     await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1 } as any)
     await clock.advance(5_000)
     const idle = await mountBand($, { isWorking: false })
-    expect(await idle.find({ type: 'Text', text: /^21s$/ })).toBeDefined()
+    expect(await idle.find({ type: 'Text', text: /^21秒$/ })).toBeDefined()
     await idle.unmount()
   })
 
@@ -170,24 +177,32 @@ describe('clean-view', () => {
     await reportPlan($, STEPS)
     const ui = await mountBand($)
     expect(await ui.find({ type: 'Text', text: /Goal/ })).toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: /Step 2 of 3$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /步驟 2／3$/ })).toBeDefined()
     await ui.unmount()
+  })
+
+  test('計畫工具要求步驟標題用繁體中文（台灣用語），工具說明與參數說明都寫明', async ($, on) => {
+    await start($, on)
+    const registration = toolRegistrations[toolRegistrations.length - 1]
+    expect(JSON.stringify(registration)).toContain('Step titles are short phrases (about 20 CJK characters at most) in Traditional Chinese (Taiwan usage)')
+    expect(JSON.stringify(registration)).toContain('A short phrase in Traditional Chinese (Taiwan usage)')
+    expect(JSON.stringify(registration)).not.toContain('in the language you reply in')
   })
 
   test('格式錯誤的計畫被拒絕，清單不變', async ($, on) => {
     await start($, on)
     const answered = await reportPlan($, [{ title: 'x', status: 'doing' }])
     // 外掛自己透過 $.tool.call 呼叫時，拒絕以 { deny } 回傳；模型呼叫時則收到錯誤結果
-    expect((answered as any).deny).toMatch(/steps must be/)
+    expect((answered as any).deny).toMatch(/steps 必須是/)
     expect(await isBoxDrawn($)).toBe(false)
   })
 
-  test('沒做完的計畫閒置時也顯示，進行中的步驟改成 Paused', async ($, on) => {
+  test('沒做完的計畫閒置時也顯示，進行中的步驟改成「暫停」', async ($, on) => {
     await start($, on)
     await reportPlan($, STEPS)
     const ui = await mountBand($, { isWorking: false })
-    expect(await ui.find({ type: 'Text', text: /^Paused$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^Working$/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^暫停$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^進行中$/ })).toBeUndefined()
     await ui.unmount()
   })
 
@@ -285,13 +300,13 @@ describe('clean-view', () => {
     await start($, on)
     await reportPlan($, STEPS)
     const narrow = await mountBand($, { bodyColumns: 30 })
-    expect(await narrow.find({ type: 'Text', text: /^Working$/ })).toBeUndefined()
+    expect(await narrow.find({ type: 'Text', text: /^進行中$/ })).toBeUndefined()
     expect(await narrow.find({ type: 'Text', text: /^▆+$/ })).toBeDefined()
     await narrow.unmount()
 
     const many = Array.from({ length: 10 }, (_, i) => ({ title: `步驟 ${i + 1}`, status: i === 0 ? 'in_progress' : 'pending' }))
     await reportPlan($, many)
-    const short = await mountBand($, { maxRows: 9 }) // 框線 2 列、標題列 1 列（沒有摘要時用目前步驟當標題）、整體進度與 Plan: 2 列，步驟剩 4 列
+    const short = await mountBand($, { maxRows: 9 }) // 框線 2 列、標題列 1 列（沒有摘要時用目前步驟當標題）、整體進度與「計畫：」2 列，步驟剩 4 列
     expect(await short.find({ type: 'Text', text: /^還有 7 項$/ })).toBeDefined()
     expect(await short.find({ type: 'Text', text: /^步驟 1$/ })).toBeDefined()
     await short.unmount()
@@ -317,7 +332,7 @@ describe('合併框讓出 gitlab-sync 那一段的列數', () => {
     await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
     await reportPlan($, STEPS)
 
-    // 框線 2 + 標題列 1 + 整體進度與 Plan: 2 + 計畫 3 列 + gitlab-sync 有框 3 列 = 11
+    // 框線 2 + 標題列 1 + 整體進度與「計畫：」2 + 計畫 3 列 + gitlab-sync 有框 3 列 = 11
     const roomy = await mountBand($, { maxRows: 11 })
     const [framedBox, framedGitlab] = ((await roomy.drawn()) as any).children
     expect(framedBox.props).toMatchObject({ borderStyle: 'round', paddingX: 1 })
@@ -334,8 +349,8 @@ describe('合併框讓出 gitlab-sync 那一段的列數', () => {
     await tight.unmount()
   })
 
-  test('合併框的列數：有框多兩列框線，加上計畫上方的列、整體進度與 Plan: 兩列、計畫各列', () => {
-    // 標題列 1 + 整體進度與 Plan: 2 + 計畫 3 列 = 6，有框再加 2
+  test('合併框的列數：有框多兩列框線，加上計畫上方的列、整體進度與「計畫：」兩列、計畫各列', () => {
+    // 標題列 1 + 整體進度與「計畫：」2 + 計畫 3 列 = 6，有框再加 2
     expect(combinedBoxRows(1, 3, true)).toBe(8)
     expect(combinedBoxRows(1, 3, false)).toBe(6)
   })
@@ -390,10 +405,10 @@ describe('clean-view 進度條動畫', () => {
     await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1 } as any)
     await $.turn.start({ text: '第二回合', turnId: 'turn-2' } as any)
     await clock.advance(2_000)
-    expect(await elapsedShown('2s')).toBe(true)
+    expect(await elapsedShown('2秒')).toBe(true)
     await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1, agentId: 'agent-1' } as any)
     await clock.advance(1_000)
-    expect(await elapsedShown('3s')).toBe(true)
+    expect(await elapsedShown('3秒')).toBe(true)
   })
 
   test('沒有 where-am-i 摘要時，標題改用目前步驟的標題，不會只剩一個「✳」', async ($, on) => {
@@ -404,7 +419,7 @@ describe('clean-view 進度條動畫', () => {
     await clock.advance(4_000)
     const ui = await mountBand($)
     expect(await ui.find({ type: 'Text', text: /^✳ 修改 config\.ts$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^4s$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^4秒$/ })).toBeDefined()
     await ui.unmount()
   })
 
@@ -551,11 +566,11 @@ describe('clean-view 純函式', () => {
     expect(cometColor(30)).toBe('#f79a4f')
   })
 
-  test('整體進度：Step x of y、只算已完成的百分比、漸層鋪在填滿的那段，全部完成變綠', () => {
+  test('整體進度：步驟 x／y、只算已完成的百分比、漸層鋪在填滿的那段，全部完成變綠', () => {
     const steps = parseSteps(STEPS)!
     const still = { frame: 0, isAnimated: false }
     const overall = overallProgress(steps, { barWidth: 91, ...still })
-    expect(overall.label).toBe('Step 2 of 3')
+    expect(overall.label).toBe('步驟 2／3')
     expect(overall.percent).toBe('33%')
     expect(overall.cells.length).toBe(91)
     expect(overall.cells[0]).toBe('#f79a4f') // 填滿那段的起點是橘色
@@ -564,11 +579,11 @@ describe('clean-view 純函式', () => {
     expect(overall.isFinished).toBe(false)
 
     const notStarted = overallProgress(parseSteps([{ title: 'a', status: 'completed' }, { title: 'b', status: 'pending' }])!, { barWidth: 10, ...still })
-    expect(notStarted.label).toBe('Step 2 of 2') // 沒有進行中時指向下一步
+    expect(notStarted.label).toBe('步驟 2／2') // 沒有進行中時指向下一步
     expect(notStarted.percent).toBe('50%')
 
     const finished = overallProgress(DONE_STEPS, { barWidth: 20, ...still })
-    expect(finished.label).toBe('Step 3 of 3')
+    expect(finished.label).toBe('步驟 3／3')
     expect(finished.percent).toBe('100%')
     expect(finished.isFinished).toBe(true)
     expect(finished.cells[0]).toBe('#2c9a52')
@@ -596,10 +611,10 @@ describe('clean-view 純函式', () => {
   })
 
   test('經過時間的格式', () => {
-    expect(formatElapsed(0)).toBe('0s')
-    expect(formatElapsed(21_400)).toBe('21s')
-    expect(formatElapsed(65_000)).toBe('1m 05s')
-    expect(formatElapsed(3_720_000)).toBe('1h 02m')
+    expect(formatElapsed(0)).toBe('0秒')
+    expect(formatElapsed(21_400)).toBe('21秒')
+    expect(formatElapsed(65_000)).toBe('1分05秒')
+    expect(formatElapsed(3_720_000)).toBe('1小時02分')
   })
 
   test('標題依顯示寬度截斷補「…」，中文一字兩格', () => {
@@ -629,24 +644,25 @@ describe('clean-view 純函式', () => {
     expect(colorRuns(stepBar('pending', 0))).toEqual([{ color: TRACK, count: 12 }])
   })
 
-  test('Step x of y 指向進行中或第一個還沒完成的步驟', () => {
-    expect(overallLabel(parseSteps(STEPS)!)).toBe('Step 2 of 3')
-    expect(overallLabel(parseSteps([{ title: 'a', status: 'pending' }, { title: 'b', status: 'completed' }, { title: 'c', status: 'completed' }])!)).toBe('Step 1 of 3')
-    expect(overallLabel(DONE_STEPS)).toBe('Step 3 of 3')
+  test('步驟 x／y 指向進行中或第一個還沒完成的步驟', () => {
+    expect(overallLabel(parseSteps(STEPS)!)).toBe('步驟 2／3')
+    expect(overallLabel(parseSteps([{ title: 'a', status: 'pending' }, { title: 'b', status: 'completed' }, { title: 'c', status: 'completed' }])!)).toBe('步驟 1／3')
+    expect(overallLabel(DONE_STEPS)).toBe('步驟 3／3')
   })
 
-  test('標籤欄至少放得下「  Step x of y」，步驟標題很短也不會換行', () => {
+  test('標籤欄至少放得下「  步驟 x／y」，步驟標題很短也不會換行', () => {
     const short = parseSteps([{ title: '讀檔', status: 'completed' }, { title: '修改', status: 'in_progress' }, { title: '測試', status: 'pending' }])!
     const view = planView(short, { frame: 0, isWorking: true, columns: 116, rows: 16 })
-    expect(view.titleColumns).toBeGreaterThanOrEqual('  Step 2 of 3'.length + 1)
+    // 「  步驟 2／3」顯示寬度 11（中文與全形斜線各佔兩格），再空一格
+    expect(view.titleColumns).toBeGreaterThanOrEqual(12)
     expect(view.overall.cells.length).toBe(116 - view.titleColumns - 5)
   })
 
   test('標題列：有目標用目標，沒有用目前步驟，兩邊都沒有就不畫', () => {
     const steps = parseSteps(STEPS)!
-    expect(titleRow('合併兩個框', steps, '3s', 116)).toEqual({ text: '✳ 合併兩個框', elapsed: '3s' })
-    expect(titleRow('', steps, '3s', 116)).toEqual({ text: '✳ 修改 config.ts', elapsed: '3s' })
-    expect(titleRow('', DONE_STEPS, '5s', 116)).toEqual({ text: '', elapsed: '5s' }) // 全部完成，沒有目前步驟
+    expect(titleRow('合併兩個框', steps, '3秒', 116)).toEqual({ text: '✳ 合併兩個框', elapsed: '3秒' })
+    expect(titleRow('', steps, '3秒', 116)).toEqual({ text: '✳ 修改 config.ts', elapsed: '3秒' })
+    expect(titleRow('', DONE_STEPS, '5秒', 116)).toEqual({ text: '', elapsed: '5秒' }) // 全部完成，沒有目前步驟
     expect(titleRow('', [], null, 116)).toBeNull()
     expect(titleRow('合併兩個框', steps, null, 10)).toBeNull() // 太窄放不下標題，也沒有時間
   })
