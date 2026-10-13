@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { gapRows, insertBeforeKey } from '../hooks/register'
+import { findKeyed, hasRoomForFrames, replaceKeyed } from '../hooks/register'
 
 const SURFACES = ['terminal', 'desktop'] as const
 
@@ -147,43 +147,103 @@ describe('active：清單顯示中才是 true，where-am-i 據此讓出 Next:', 
   })
 })
 
-// 畫出來的樹裡有幾個空一列的 Box（marginTop 1）
-function gapCount(node: any): number {
-  if (!node || typeof node !== 'object') return 0
-  const own = node.props?.marginTop === 1 ? 1 : 0
-  return own + ((node.children ?? []) as unknown[]).reduce((sum: number, child) => sum + gapCount(child), 0)
-}
-
 const bandWith = (maxRows: number) => ({ ...BAND, surface: 'terminal', props: { ...BAND.props, maxRows, scroll: { offset: 0, bodyRows: maxRows } } })
 
-describe('band 放不下時拿掉「next:」上面的空白列', () => {
-  test('其他 mod 估 6 列，加上清單與兩列空白（清單上面、gitlab-sync 那一列上面）放得下才空', () => {
+// 畫出來的樹裡，next 清單那個 Box（第一個子元素是「next:」或「next steps…」）
+function listBox(node: any): any {
+  if (!node || typeof node !== 'object') return null
+  const first = node.children?.[0]
+  if (node.type === 'Box' && first?.type === 'Text' && /^next/.test(String(first.children?.[0] ?? ''))) return node
+  for (const child of node.children ?? []) {
+    const found = listBox(child)
+    if (found !== null) return found
+  }
+  return null
+}
+
+// 代替串接在裡面的 gitlab-sync 與 Claude Code：其他內容在上、gitlab-sync 那一段（key gitlab-band，有框）在最後
+function engineWithGitlabLine(on: any, reply: string) {
+  const sent = { filled: '' }
+  on('turn.complete', () => ({ text: '' }))
+  on('command.list', () => ({ value: [] }))
+  on('model.fork', () => ({ value: { isAnswered: true, text: reply, usage: USAGE } }))
+  on('prompt.suggest', () => ({ isShown: true }))
+  on('prompt.fill', (_$: any, e: any) => {
+    sent.filled = e.text
+    return { isFilled: true }
+  })
+  on('ui.render', ($: any, e: any) => {
+    const { Box, Text } = $.ui.resolve(e)
+    return Box({
+      flexDirection: 'column',
+      children: [
+        Text({ children: 'engine draws' }),
+        Box({ key: 'gitlab-band', borderStyle: 'round', borderColor: 'subtle', paddingX: 1, children: [Text({ children: 'GitLab line' })] }),
+      ],
+    })
+  })
+  return sent
+}
+
+describe('band 的每一段各一個框，放不下時一起拿掉', () => {
+  test('清單加框線上下兩列，再加 gitlab-sync 那一段有框時的 3 列，放得下才加框', () => {
     // 兩個建議：next:、兩個選項、dismiss 共 4 列
-    expect(gapRows(12, 4)).toBe(1)
-    expect(gapRows(11, 4)).toBe(0)
-    // 三個建議跟 gitlab-sync 的估算一樣在 13 列切換
-    expect(gapRows(13, 5)).toBe(1)
-    expect(gapRows(12, 5)).toBe(0)
+    expect(hasRoomForFrames(9, 4, true)).toBe(true)
+    expect(hasRoomForFrames(8, 4, true)).toBe(false)
+    // 沒有 gitlab-sync 那一段時只算清單
+    expect(hasRoomForFrames(6, 4, false)).toBe(true)
+    expect(hasRoomForFrames(5, 4, false)).toBe(false)
   })
 
-  test('放得下時空一列，放不下時不空', async ($, on) => {
-    engine(on, TWO_SUGGESTIONS)
+  test('放得下時清單有圓角框，gitlab-sync 那一段的框照留', async ($, on) => {
+    engineWithGitlabLine(on, TWO_SUGGESTIONS)
     await finishTurn($)
     await wait()
 
-    const roomy = await $.ui.mount(bandWith(12) as any)
-    expect(gapCount(await roomy.drawn())).toBe(1)
-    await roomy.unmount()
-
-    const tight = await $.ui.mount(bandWith(11) as any)
-    expect(gapCount(await tight.drawn())).toBe(0)
-    // 空白列拿掉了，選項照樣都在
-    expect(await tight.find({ type: 'Button', text: /提交/ })).toBeDefined()
-    expect(await tight.find({ type: 'Button', text: /dismiss/ })).toBeDefined()
-    await tight.unmount()
+    const ui = await $.ui.mount(bandWith(9) as any)
+    const drawn = await ui.drawn()
+    expect(listBox(drawn).props).toMatchObject({ borderStyle: 'round', borderColor: 'subtle', paddingX: 1 })
+    expect((findKeyed(drawn as any, 'gitlab-band') as any).props).toMatchObject({ borderStyle: 'round', paddingX: 1 })
+    await ui.unmount()
   })
 
-  test('產生建議時的「next steps…」也一樣', async ($, on) => {
+  test('放不下時清單與 gitlab-sync 那一段的框一起拿掉，改兩格內距讓文字留在同一欄，選項照樣都在', async ($, on) => {
+    engineWithGitlabLine(on, TWO_SUGGESTIONS)
+    await finishTurn($)
+    await wait()
+
+    const ui = await $.ui.mount(bandWith(8) as any)
+    const drawn = await ui.drawn()
+    const list = listBox(drawn)
+    expect(list.props.borderStyle).toBeUndefined()
+    expect(list.props.paddingX).toBe(2)
+    const gitlab = findKeyed(drawn as any, 'gitlab-band') as any
+    expect(gitlab.props.borderStyle).toBeUndefined()
+    expect(gitlab.props.borderColor).toBeUndefined()
+    expect(gitlab.props.paddingX).toBe(2)
+    expect(await ui.find({ type: 'Button', text: /提交/ })).toBeDefined()
+    expect(await ui.find({ type: 'Button', text: /dismiss/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('裡面的 mod 已經拿掉 gitlab-sync 那一段的框時，清單也不加框', async ($, on) => {
+    on('turn.complete', () => ({ text: '' }))
+    on('command.list', () => ({ value: [] }))
+    on('model.fork', () => ({ value: { isAnswered: true, text: TWO_SUGGESTIONS, usage: USAGE } }))
+    on('prompt.suggest', () => ({ isShown: true }))
+    on('ui.render', ($: any, e: any) => {
+      const { Box, Text } = $.ui.resolve(e)
+      return Box({ flexDirection: 'column', children: [Box({ key: 'gitlab-band', paddingX: 2, children: [Text({ children: 'GitLab line' })] })] })
+    })
+    await finishTurn($)
+    await wait()
+
+    const ui = await $.ui.mount(bandWith(30) as any)
+    expect(listBox(await ui.drawn()).props.borderStyle).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('產生建議時的「next steps…」也有框', async ($, on) => {
     // 跟 engine() 一樣，只是建議一直還沒回來，畫面停在產生中
     on('turn.complete', () => ({ text: '' }))
     on('command.list', () => ({ value: [] }))
@@ -192,39 +252,18 @@ describe('band 放不下時拿掉「next:」上面的空白列', () => {
     void finishTurn($)
     await wait()
 
-    const roomy = await $.ui.mount(bandWith(9) as any)
+    const roomy = await $.ui.mount(bandWith(3) as any)
     expect(await roomy.find({ type: 'Text', text: /next steps…/ })).toBeDefined()
-    expect(gapCount(await roomy.drawn())).toBe(1)
+    expect(listBox(await roomy.drawn()).props.borderStyle).toBe('round')
     await roomy.unmount()
 
-    const tight = await $.ui.mount(bandWith(8) as any)
-    expect(gapCount(await tight.drawn())).toBe(0)
+    const tight = await $.ui.mount(bandWith(2) as any)
+    expect(listBox(await tight.drawn()).props.borderStyle).toBeUndefined()
     await tight.unmount()
   })
 })
 
-describe('清單插在 gitlab-sync 那一列上面，讓那一列緊貼輸入框', () => {
-  // 代替串接在裡面的 gitlab-sync 與 Claude Code：其他內容在上、gitlab-sync 那一列（key gitlab-band）在最後
-  function engineWithGitlabLine(on: any, reply: string) {
-    const sent = { filled: '' }
-    on('turn.complete', () => ({ text: '' }))
-    on('command.list', () => ({ value: [] }))
-    on('model.fork', () => ({ value: { isAnswered: true, text: reply, usage: USAGE } }))
-    on('prompt.suggest', () => ({ isShown: true }))
-    on('prompt.fill', (_$: any, e: any) => {
-      sent.filled = e.text
-      return { isFilled: true }
-    })
-    on('ui.render', ($: any, e: any) => {
-      const { Box, Text } = $.ui.resolve(e)
-      return Box({
-        flexDirection: 'column',
-        children: [Text({ children: 'engine draws' }), Box({ key: 'gitlab-band', children: [Text({ children: 'GitLab line' })] })],
-      })
-    })
-    return sent
-  }
-
+describe('清單插在 gitlab-sync 那一段上面，讓那一段緊貼輸入框', () => {
   // 畫出來的文字依序排成一串
   function textsOf(node: any): string[] {
     if (typeof node === 'string') return [node]
@@ -232,7 +271,7 @@ describe('清單插在 gitlab-sync 那一列上面，讓那一列緊貼輸入框
     return ((node.children ?? []) as unknown[]).flatMap(textsOf)
   }
 
-  test('清單在 gitlab-sync 那一列上面，那一列仍是最後一列', async ($, on) => {
+  test('清單在 gitlab-sync 那一段上面，那一段仍是最後一段', async ($, on) => {
     engineWithGitlabLine(on, TWO_SUGGESTIONS)
     await finishTurn($)
     await wait()
@@ -257,7 +296,7 @@ describe('清單插在 gitlab-sync 那一列上面，讓那一列緊貼輸入框
     await ui.unmount()
   })
 
-  test('沒有 gitlab-sync 那一列時照舊接在最後', async ($, on) => {
+  test('沒有 gitlab-sync 那一段時照舊接在最後', async ($, on) => {
     engine(on, TWO_SUGGESTIONS)
     await finishTurn($)
     await wait()
@@ -269,16 +308,18 @@ describe('清單插在 gitlab-sync 那一列上面，讓那一列緊貼輸入框
     await ui.unmount()
   })
 
-  test('insertBeforeKey 往下層找，沿路換成新的物件，原本的 tree 不動；找不到回傳 null', () => {
+  test('replaceKeyed 往下層找、換成幾個元素，沿路換成新的物件，原本的 tree 不動；找不到回傳 null', () => {
     const line = { type: 'Box', props: { key: 'gitlab-band' }, children: ['GitLab line'] }
     const inner = { type: 'Box', props: { flexDirection: 'column' }, children: ['rest', line] }
     const tree = Object.freeze({ type: 'Box', props: { flexDirection: 'column' }, children: ['box', inner] })
     const block = { type: 'Text', children: ['next:'] }
 
-    const placed: any = insertBeforeKey(tree as any, 'gitlab-band', block as any)
+    const placed: any = replaceKeyed(tree as any, 'gitlab-band', found => [block as any, found])
     expect(placed.children[1].children).toEqual(['rest', block, line])
     expect(inner.children).toEqual(['rest', line])
-    expect(insertBeforeKey(tree as any, 'missing', block as any)).toBeNull()
-    expect(insertBeforeKey('text' as any, 'gitlab-band', block as any)).toBeNull()
+    expect(findKeyed(tree as any, 'gitlab-band')).toBe(line)
+    expect(replaceKeyed(tree as any, 'missing', found => [found])).toBeNull()
+    expect(findKeyed(tree as any, 'missing')).toBeNull()
+    expect(replaceKeyed('text' as any, 'gitlab-band', found => [found])).toBeNull()
   })
 })

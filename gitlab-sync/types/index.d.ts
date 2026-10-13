@@ -36,8 +36,5 @@ declare module 'claude-code' {
       inbox: InboxStatus
       githubInbox: InboxStatus
     }
-    // next-steps 擁有，這裡只讀 active：清單顯示時 band 多一段，用來估算這一列上面放不放得下空白列。
-    // 形狀要跟 next-steps/types/index.d.ts 一致，../scripts/check-contracts.sh 會抓出不一致
-    'next-steps': { active: boolean }
   }
 }

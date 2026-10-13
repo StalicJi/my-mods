@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { gitlabProjectOf, noteEvents, stateEvents, toItem, toNote, toOpenIssue, workItemKind } from '../hooks/gitlab'
 import type { GitlabItem, GitlabNote } from '../hooks/gitlab'
-import { bandSegments, gapAboveRows, remoteSegment, repoReport, startupToastText, toastText } from '../hooks/register'
+import { bandFrame, bandSegments, remoteSegment, repoReport, startupToastText, toastText } from '../hooks/register'
 import { clipColumns, describeEvent, excerptOf, formatAgo, groupByKind, inProject, openIssueLines, remoteHostOf } from '../hooks/shared'
 import type { ForgeEvent } from '../hooks/shared'
 import type { InboxStatus, KindCount, RepoSync } from '../types'
@@ -669,7 +669,7 @@ describe('整合情境', () => {
     expect(await bandText($)).toContain('GitLab 1 則新動態（/gitlab）')
   })
 
-  test('band 是一行字：不加框、不上底色，文字前留兩格跟上方摘要框的內文對齊', OPTIONS, async ($, on) => {
+  test('band 這一段有圓角框、不上底色，框線加內距共兩格，文字跟其他框的內文對齊', OPTIONS, async ($, on) => {
     mock.clock(on, { now: T0 })
     mock.store(on)
     on('env.get', () => ({ value: 'test-token' }))
@@ -680,8 +680,7 @@ describe('整合情境', () => {
     for (const surface of ['terminal', 'desktop'] as const) {
       const ui = await $.ui.mount({ plugin: 'gitlab-sync', surface, component: 'AbovePrompt', props: BAND_PROPS } as any)
       const band = await ui.find({ type: 'Box', key: 'gitlab-band' })
-      expect(band?.props).toMatchObject({ paddingX: 2 })
-      expect(band?.props.borderStyle).toBeUndefined()
+      expect(band?.props).toMatchObject({ borderStyle: 'round', borderColor: 'subtle', paddingX: 1 })
       expect(band?.props.paddingY).toBeUndefined()
       expect((await ui.findAll({ type: 'Box' })).some(box => box.props.backgroundColor !== undefined)).toBe(false)
       expect(await ui.find({ type: 'Text', text: /⎇ main/ })).toBeDefined()
@@ -705,27 +704,9 @@ describe('整合情境', () => {
     await ui.unmount()
   })
 
-  test('跟上面的區塊之間空一列；整排放不下時拿掉，next 清單顯示時估算多算清單與一列空白', OPTIONS, async ($, on) => {
-    // 摘要框 5 + 這一列 1 + 空白 1 = 7；加上 next 清單 5 與第二列空白 = 13
-    expect(gapAboveRows(7, false)).toBe(1)
-    expect(gapAboveRows(6, false)).toBe(0)
-    expect(gapAboveRows(13, true)).toBe(1)
-    expect(gapAboveRows(12, true)).toBe(0)
-
-    mock.clock(on, { now: T0 })
-    mock.store(on)
-    on('env.get', () => ({ value: 'test-token' }))
-    on('state.get', { plugin: 'next-steps', key: 'active' }, () => ({ value: { value: true, version: 1 } }))
-    fakeCommands(on, () => ({ root: '/work-q', branch: 'main', upstream: 'origin/main', counts: '0\t0', status: '' }))
-    fakeGitlab(on, path => (path === '/user' ? ME : []))
-
-    await start($, on)
-    for (const [maxRows, gap] of [[13, 1], [12, 0]] as const) {
-      const ui = await $.ui.mount({ plugin: 'gitlab-sync', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND_PROPS, maxRows } } as any)
-      const band = await ui.find({ type: 'Box', key: 'gitlab-band' })
-      expect(band?.props.marginTop).toBe(gap)
-      await ui.unmount()
-    }
+  test('放得下自己這一段（框線上下各一列加這一列）才加框；拿掉框時改用兩格內距，文字留在同一欄', () => {
+    expect(bandFrame(3)).toEqual({ borderStyle: 'round', borderColor: 'subtle', paddingX: 1 })
+    expect(bandFrame(2)).toEqual({ paddingX: 2 })
   })
 
   test('band 的還開著的 issue 張數：背景輪詢會更新，查不到或通知暫停時不留舊數字', OPTIONS, async ($, on) => {

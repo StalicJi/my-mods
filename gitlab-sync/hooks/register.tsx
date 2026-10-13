@@ -44,16 +44,15 @@ const MAX_UNREAD = 50
 const MAX_SEEN_IDS = 500
 const TOAST_MS = 10_000
 const TOAST_COLUMNS = 100
-// band 是一行字，不加框也不上底色（框、底色、膠囊兩端都試過，使用者都不要）。
-// 文字前留兩格：上方 where-am-i 的摘要框是「框線一格＋內距一格」才寫字，兩邊的文字起點才會對齊
+// band 上的每一段各自一個框，比較好分辨區塊（10/8 試過框、底色、膠囊，當時使用者都不要；10/13 改成每段各一個框）。
+// 不上底色。框線一格加內距一格才寫字，跟其他框的文字起點對齊；放不下拿掉框時改用兩格內距，文字留在同一欄
+const BAND_FRAME = { borderStyle: 'round', borderColor: 'subtle', paddingX: 1 } as const
 const BAND_PADDING_X = 2
-// 這一列的 key：next-steps 靠它找到這一列，把清單插在它上面（next-steps/hooks/register.tsx 的 GITLAB_BAND_KEY），改名要兩邊一起改
+// 有框時這一段佔的列數：框線上下各一列加這一列
+const FRAMED_ROWS = 3
+// 這一段的 key：next-steps 靠它找到這一段，把清單插在它上面，整排放不下時也由它拿掉這裡的框
+// （next-steps/hooks/register.tsx 的 GITLAB_BAND_KEY），改名要兩邊一起改
 const BAND_KEY = 'gitlab-band'
-// next-steps 的清單是否顯示中（next-steps 擁有）；顯示時這一列上面多一段清單
-const nextStepsActive = { plugin: 'next-steps', key: 'active' } as const
-// 估算整排列數用：上面 where-am-i 的摘要框約 5 列；next-steps 的清單（next:、3 個選項、dismiss）5 列
-const SUMMARY_BOX_ROWS = 5
-const NEXT_STEPS_ROWS = 5
 // 背景跑的 git 不能停在密碼提示，連不上就直接失敗
 const GIT_ENV = { GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' }
 const EMPTY_INBOX: InboxStatus = { unreadCount: 0, problem: null, openCounts: null }
@@ -612,7 +611,6 @@ export const register: Register = (on, options) => {
     const segments = bandSegments(await read($, repoSync), await read($, gitlabInbox), await read($, githubInbox))
     if (segments.length === 0) return rest
     const { Box, Text } = $.ui.resolve(e)
-    const { value: hasNextSteps = false } = await $.state.get(nextStepsActive)
     const line = (
       <Text wrap="truncate-end">
         {segments.flatMap((segment, index) =>
@@ -626,11 +624,11 @@ export const register: Register = (on, options) => {
       </Text>
     )
     // 排在 band 最下面，緊貼輸入框：其他 mod 與 Claude Code 的內容都在上面。
-    // 串接順序上包在這個 mod 外面、又要接在最後的 next-steps，會把清單插在這一列上面
+    // 串接順序上包在這個 mod 外面、又要接在最後的 next-steps，會把清單插在這一段上面
     return (
       <Box flexDirection="column">
         {rest}
-        <Box key={BAND_KEY} paddingX={BAND_PADDING_X} marginTop={gapAboveRows(e.props.maxRows, hasNextSteps)}>
+        <Box key={BAND_KEY} {...bandFrame(e.props.maxRows)}>
           {line}
         </Box>
       </Box>
@@ -638,12 +636,9 @@ export const register: Register = (on, options) => {
   })
 }
 
-// 這一列跟上面的區塊之間空一列，跟摘要框與 next 清單之間一樣（next-steps 的 gapRows），三段等距。
-// 整排放不下時所有空白列一起拿掉：兩邊用同樣的估算（摘要框、顯示中的 next 清單、這一列，加上區塊之間各一列空白），改規則要兩邊一起看
-export function gapAboveRows(maxRows: number, hasNextSteps: boolean): number {
-  const blockRows = SUMMARY_BOX_ROWS + (hasNextSteps ? NEXT_STEPS_ROWS : 0) + 1
-  const gapCount = hasNextSteps ? 2 : 1
-  return blockRows + gapCount <= maxRows ? 1 : 0
+// 這個 mod 只看得到自己這一段：放得下就加框。上面還有 next 清單時，整排放不放得下由 next-steps 判斷，放不下會一起拿掉這裡的框
+export function bandFrame(maxRows: number): { paddingX: number; borderStyle?: string; borderColor?: string } {
+  return FRAMED_ROWS <= maxRows ? { ...BAND_FRAME } : { paddingX: BAND_PADDING_X }
 }
 
 async function refreshAfterTurn($: EngineInterface) {

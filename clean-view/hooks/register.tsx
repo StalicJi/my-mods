@@ -1,6 +1,6 @@
 // Clean View：工具呼叫收成一行淡色摘要（Edit、Write、Bash 與錯誤訊息照常顯示），Claude 回報的計畫清單顯示在 prompt 上方；/clean 切換
 import { atom, read, update } from 'claude-code'
-import type { Color, EngineInterface, Register, ThemeKey, Timer } from 'claude-code'
+import type { Color, EngineInterface, Register, RenderNode, ThemeKey, Timer } from 'claude-code'
 
 import type { CombinedBoxMode, PlanStatus, PlanStep, TurnClock } from '../types'
 
@@ -32,6 +32,13 @@ const STATUS_COLUMNS = 8 // 「Working」寬 7
 const MIN_TITLE_COLUMNS = 12
 const BOX_CHROME_COLUMNS = 4 // 外框左右各一格線、一格內距
 const BOX_BORDER_ROWS = 2
+// gitlab-sync 那一段的 key（gitlab-sync/hooks/register.tsx 的 BAND_KEY），改名要一起改。那一段固定在 band 最下面、
+// 緊貼輸入框；合併框要讓出它的列數，不然計畫一長整排就超過 maxRows，最下面的同步狀態會被收成「n more」
+const GITLAB_BAND_KEY = 'gitlab-band'
+const GITLAB_FRAMED_ROWS = 3
+const COMBINED_BOX_FRAME = { paddingX: 1, borderStyle: 'round', borderColor: 'suggestion' } as const
+// 拿掉框時的左右內距：框線一格加內距一格的位置，文字留在同一欄
+const UNFRAMED_PADDING_X = 2
 const PLAN_HEADER_ROWS = 2 // 整體進度列與「Plan:」標題列
 const PERCENT_COLUMNS = 5 // 「 100%」
 const MIN_OVERALL_BAR_WIDTH = 6
@@ -314,15 +321,18 @@ export const register: Register = on => {
     const innerColumns = e.props.bodyColumns - BOX_CHROME_COLUMNS
     const [summary, clock, steps, frame] = await Promise.all([readRecapSummary($), read($, turnClock), read($, plan), read($, tick)])
     const title = titleRow(summary?.goal ?? '', steps, await elapsedLabel($, clock), innerColumns)
-    const view = planView(steps, {
-      frame,
-      isWorking: e.props.isWorking,
-      columns: innerColumns,
-      rows: e.props.maxRows - BOX_BORDER_ROWS - rowsAbovePlan(title, summary),
-    })
+    const rowsAbove = rowsAbovePlan(title, summary)
+    const gitlabRows = rowsOfGitlabLine(rest)
+    const viewFor = (rows: number) => planView(steps, { frame, isWorking: e.props.isWorking, columns: innerColumns, rows })
+    // 先照有框排：讓出 gitlab-sync 那一段的列數。計畫列數有下限，視窗太矮時還是放不下，就把合併框與 gitlab-sync 那一段的框
+    // 一起拿掉（使用者選的「放不下先拿掉框」），省下 4 列；拿掉框時改用兩格內距，文字留在同一欄、可用寬度不變
+    const framedView = viewFor(e.props.maxRows - BOX_BORDER_ROWS - rowsAbove - gitlabRows)
+    const isFramed = combinedBoxRows(rowsAbove, framedView.rows.length, true) + gitlabRows <= e.props.maxRows
+    const view = isFramed ? framedView : viewFor(e.props.maxRows - rowsAbove - Math.min(gitlabRows, 1))
+    const below = isFramed ? rest : replaceKeyed(rest, GITLAB_BAND_KEY, withoutFrame)
     return (
       <Box flexDirection="column">
-        <Box flexDirection="column" paddingX={1} borderStyle="round" borderColor="suggestion">
+        <Box flexDirection="column" {...(isFramed ? COMBINED_BOX_FRAME : { paddingX: UNFRAMED_PADDING_X })}>
           {/* 標題列（照影片）：左邊是目標，右邊是這個回合經過的時間 */}
           {title && (
             <Box flexDirection="row" justifyContent="space-between">
@@ -382,7 +392,7 @@ export const register: Register = on => {
           ))}
           {summary?.waiting && <Text color="yellow" wrap="truncate-end">{`  Wait: ${summary.waiting}`}</Text>}
         </Box>
-        {rest}
+        {below}
       </Box>
     )
   })
@@ -407,6 +417,47 @@ export function isCombinedBoxShown(mode: CombinedBoxMode, isWorking: boolean) {
 // 計畫區塊上方、框線以外的列數：標題列、Now、Wait；跟 JSX 裡畫哪些列要一致
 function rowsAbovePlan(title: TitleRow | null, summary: RecapSummary | null) {
   return (title ? 1 : 0) + (summary?.now ? 1 : 0) + (summary?.waiting ? 1 : 0)
+}
+
+// 串接在裡面的 gitlab-sync 那一段佔幾列：有框 3 列、沒框 1 列、沒有這一段 0 列
+export function rowsOfGitlabLine(rest: RenderNode): number {
+  const line = findKeyed(rest, GITLAB_BAND_KEY)
+  if (line === null) return 0
+  const props = (line as { props?: Record<string, unknown> }).props
+  return props?.borderStyle !== undefined ? GITLAB_FRAMED_ROWS : 1
+}
+
+// 合併框整個佔幾列：框線、計畫上方的標題列與 Now／Wait、整體進度與「Plan:」、計畫各列
+export function combinedBoxRows(rowsAbove: number, planRowCount: number, isFramed: boolean): number {
+  return (isFramed ? BOX_BORDER_ROWS : 0) + rowsAbove + PLAN_HEADER_ROWS + planRowCount
+}
+
+// 拿掉 gitlab-sync 那一段的框，改用兩格內距讓文字留在同一欄（框的屬性見 gitlab-sync 的 BAND_FRAME；next-steps 也有同樣的做法）
+function withoutFrame(node: RenderNode): RenderNode {
+  if (typeof node !== 'object' || node === null || !('props' in node) || node.props === undefined) return node
+  const { borderStyle: _style, borderColor: _color, ...props } = node.props as Record<string, string | number | boolean>
+  return { ...node, props: { ...props, paddingX: UNFRAMED_PADDING_X } } as RenderNode
+}
+
+// 把 tree 裡 key 為 key 的元素換成 replace 的結果；找不到就原樣回傳。tree 是 next(e) 給的唯讀資料，沿路的節點都換成新的物件
+function replaceKeyed(node: RenderNode, key: string, replace: (found: RenderNode) => RenderNode): RenderNode {
+  if (typeof node !== 'object' || node === null) return node
+  if ('props' in node && (node.props as Record<string, unknown> | undefined)?.key === key) return replace(node)
+  if (!('children' in node) || !Array.isArray(node.children)) return node
+  const children = node.children as RenderNode[]
+  const replaced = children.map(child => replaceKeyed(child, key, replace))
+  return replaced.every((child, index) => child === children[index]) ? node : ({ ...node, children: replaced } as RenderNode)
+}
+
+function findKeyed(node: RenderNode, key: string): RenderNode | null {
+  if (typeof node !== 'object' || node === null) return null
+  if ('props' in node && (node.props as Record<string, unknown> | undefined)?.key === key) return node
+  const children = 'children' in node && Array.isArray(node.children) ? (node.children as RenderNode[]) : []
+  for (const child of children) {
+    const found = findKeyed(child, key)
+    if (found !== null) return found
+  }
+  return null
 }
 
 // 回合進行中算到現在（只有這時才需要讀時鐘），結束了就停在結束那一刻；還沒有回合就不顯示

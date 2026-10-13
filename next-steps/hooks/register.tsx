@@ -14,7 +14,7 @@
 // 本檔案已修改（fork 自 anthropics/claude-plugins-community 的 next-steps 1.0.0）：
 // forkPrompt 加上 SUGGESTION_LANGUAGE，要求建議一律用繁體中文（台灣用語）；
 // 清單顯示時把 state `active` 設成 true，讓 where-am-i 讓出它摘要框裡的「Next:」；
-// band 放不下時拿掉清單上面的空白列；清單插在 gitlab-sync 那一列上面，讓那一列緊貼輸入框。
+// 清單加框、插在 gitlab-sync 那一段上面（讓那一段緊貼輸入框），放不下時連 gitlab-sync 的框一起拿掉。
 
 import { atom, update } from 'claude-code'
 import type { CommandInfo, EngineInterface, Register, RenderElement, RenderNode } from 'claude-code'
@@ -27,11 +27,15 @@ type View =
   | { kind: 'offer'; items: Suggestion[] }
 
 const MAX_SUGGESTIONS = 3
-// band 裡其他 mod 大約佔的列數：where-am-i 的摘要框（清單顯示時它讓出 Next，外框 2 列加 Goal、Now、Wait）5 列，
-// 加上 gitlab-sync 一列。這個 mod 看不到它們畫了什麼，用估計值判斷整排放不放得下
-const OTHER_BAND_ROWS = 6
-// gitlab-sync 那一列的 key（gitlab-sync/hooks/register.tsx 的 BAND_KEY），改名要兩邊一起改。那一列固定在 band 最下面、
-// 緊貼輸入框；串接順序上這個 mod 包在 gitlab-sync 外面，照常接在最後會跑到那一列下面，所以清單插在它上面
+// band 上的每一段各自一個框，比較好分辨區塊；跟 gitlab-sync 那一段的框一樣（gitlab-sync/hooks/register.tsx 的 BAND_FRAME）。
+// 框線一格加內距一格才寫字；拿掉框時改用兩格內距，文字留在同一欄
+const LIST_FRAME = { borderStyle: 'round', borderColor: 'subtle', paddingX: 1 } as const
+const UNFRAMED_PADDING_X = 2
+const FRAME_ROWS = 2
+// gitlab-sync 那一段有框時佔的列數：框線上下各一列加那一列
+const GITLAB_FRAMED_ROWS = 3
+// gitlab-sync 那一段的 key（gitlab-sync/hooks/register.tsx 的 BAND_KEY），改名要兩邊一起改。那一段固定在 band 最下面、
+// 緊貼輸入框；串接順序上這個 mod 包在 gitlab-sync 外面，照常接在最後會跑到那一段下面，所以清單插在它上面
 const GITLAB_BAND_KEY = 'gitlab-band'
 const LABEL_MAX = 48
 const PROMPT_MAX = 600
@@ -223,39 +227,47 @@ export const register: Register = (on, options) => {
     if (e.props.hasSurvey || e.props.isWorking || view.kind === 'hidden') return below
     const { Box, Text, Button } = $.ui.resolve(e)
 
-    const block = view.kind === 'loading' ? (
-      <Box marginTop={gapRows(e.props.maxRows, 1)}>
-        <Text dimColor>next steps…</Text>
-      </Box>
-    ) : (
-      // 「next:」、每個選項各一列、dismiss
-      <Box flexDirection="column" marginTop={gapRows(e.props.maxRows, 1 + view.items.length + 1)}>
-        <Text dimColor>next:</Text>
-        {view.items.map((item, index) => (
-          <Box key={`s${index}`} marginLeft={2}>
-            <Button
-              key={`pick${index + 1}`}
-              hotkey={String(index + 1)}
-              plain
-              label={item.label}
-              onPress={() => {
-                show($, { kind: 'hidden' })
-                void $.prompt.fill({ text: item.prompt }).then(
-                  r => r.isFilled || $.ui.toast('could not fill the prompt box'),
-                  error => $.ui.toast(`could not fill: ${String(error)}`),
-                )
-              }}
-            />
-          </Box>
-        ))}
-        <Box marginLeft={2}>
-          <Button key="dismiss" hotkey="0" plain label="dismiss" onPress={() => show($, { kind: 'hidden' })} />
-        </Box>
+    // 「next:」、每個選項各一列、dismiss；產生中只有一列
+    const listRows = view.kind === 'loading' ? 1 : 1 + view.items.length + 1
+    const gitlabLine = findKeyed(below, GITLAB_BAND_KEY)
+    // 串接在裡面的 clean-view 放不下時已經拿掉那一段的框，清單也跟著不加框：所有框一起有、一起沒有
+    const isFramed = hasRoomForFrames(e.props.maxRows, listRows, gitlabLine !== null) && !isUnframed(gitlabLine)
+    const block = (
+      <Box flexDirection="column" {...(isFramed ? LIST_FRAME : { paddingX: UNFRAMED_PADDING_X })}>
+        {view.kind === 'loading' ? (
+          <Text dimColor>next steps…</Text>
+        ) : (
+          [
+            <Text dimColor>next:</Text>,
+            ...view.items.map((item, index) => (
+              <Box key={`s${index}`} marginLeft={2}>
+                <Button
+                  key={`pick${index + 1}`}
+                  hotkey={String(index + 1)}
+                  plain
+                  label={item.label}
+                  onPress={() => {
+                    show($, { kind: 'hidden' })
+                    void $.prompt.fill({ text: item.prompt }).then(
+                      r => r.isFilled || $.ui.toast('could not fill the prompt box'),
+                      error => $.ui.toast(`could not fill: ${String(error)}`),
+                    )
+                  }}
+                />
+              </Box>
+            )),
+            <Box marginLeft={2}>
+              <Button key="dismiss" hotkey="0" plain label="dismiss" onPress={() => show($, { kind: 'hidden' })} />
+            </Box>,
+          ]
+        )}
       </Box>
     )
-    // gitlab-sync 那一列要緊貼輸入框，有它就插在它上面；沒有（不在 repo、有問卷時）就照舊接在最後
+    // gitlab-sync 那一段要緊貼輸入框，有它就把清單插在它上面，放不下時連它的框一起拿掉；
+    // 沒有它（不在 repo、有問卷時）就照舊接在最後
+    const placed = replaceKeyed(below, GITLAB_BAND_KEY, gitlabLine => [block, isFramed ? gitlabLine : withoutFrame(gitlabLine)])
     return (
-      (insertBeforeKey(below, GITLAB_BAND_KEY, block) as RenderElement | null) ?? (
+      (placed as RenderElement | null) ?? (
         <Box flexDirection="column">
           {below}
           {block}
@@ -265,23 +277,47 @@ export const register: Register = (on, options) => {
   })
 }
 
-// 清單上面空一列，跟 gitlab-sync 那一列上面的空白列一樣，摘要框、清單、gitlab-sync 那一列三段等距。
-// 整排超過 maxRows 時 Claude Code 會把最下面收成「n more」，最先被藏起來的就是這裡的選項，所以放不下時兩列空白一起拿掉：
-// gitlab-sync 的 gapAboveRows 用同樣的估算；where-am-i 判斷要不要拿掉外框時，把這裡算成沒有空白列。改規則要三邊一起看
-export function gapRows(maxRows: number, listRows: number): number {
-  const gapCount = 2
-  return OTHER_BAND_ROWS + listRows + gapCount <= maxRows ? 1 : 0
+// 整排超過 maxRows 時 Claude Code 會把最下面收成「n more」，最先被藏起來的就是這裡的選項，所以放不下時拿掉框：
+// 清單跟 gitlab-sync 那一段的框一起拿掉（使用者選的「先拿掉框」）。這個 mod 看得到串接在裡面的 gitlab-sync，
+// 看不到更外層的 where-am-i 摘要框，所以只算清單與 gitlab-sync 那一段
+export function hasRoomForFrames(maxRows: number, listRows: number, hasGitlabLine: boolean): boolean {
+  return FRAME_ROWS + listRows + (hasGitlabLine ? GITLAB_FRAMED_ROWS : 0) <= maxRows
 }
 
-// 在 tree 裡找 key 為 key 的元素，把 block 插在它前面，回傳換過的 tree；找不到回傳 null。
-// 從後面找起：要找的那一列通常在最後。tree 是 next(e) 給的唯讀資料，沿路的節點都換成新的物件
-export function insertBeforeKey(node: RenderNode, key: string, block: RenderElement): RenderNode | null {
+function isUnframed(node: RenderNode | null): boolean {
+  if (typeof node !== 'object' || node === null || !('props' in node)) return false
+  return (node.props as Record<string, unknown> | undefined)?.borderStyle === undefined
+}
+
+// 拿掉 gitlab-sync 那一段的框，改用兩格內距讓文字留在同一欄（框的屬性見 gitlab-sync 的 BAND_FRAME）
+function withoutFrame(node: RenderNode): RenderNode {
+  if (typeof node !== 'object' || node === null || !('props' in node) || node.props === undefined) return node
+  const { borderStyle: _style, borderColor: _color, ...props } = node.props as Record<string, string | number | boolean>
+  return { ...node, props: { ...props, paddingX: UNFRAMED_PADDING_X } } as RenderNode
+}
+
+// 在 tree 裡找 key 為 key 的元素
+export function findKeyed(node: RenderNode, key: string): RenderNode | null {
+  if (keyOf(node) === key) return node
+  for (const child of childrenOf(node) ?? []) {
+    const found = findKeyed(child, key)
+    if (found !== null) return found
+  }
+  return null
+}
+
+// 把 tree 裡 key 為 key 的元素換成 replace 回傳的幾個元素，回傳換過的 tree；找不到回傳 null。
+// 從後面找起：要找的那一段通常在最後。tree 是 next(e) 給的唯讀資料，沿路的節點都換成新的物件
+export function replaceKeyed(node: RenderNode, key: string, replace: (found: RenderNode) => RenderNode[]): RenderNode | null {
   const children = childrenOf(node)
   if (children === null) return null
   const index = children.findIndex(child => keyOf(child) === key)
-  if (index >= 0) return { ...(node as object), children: [...children.slice(0, index), block, ...children.slice(index)] } as RenderNode
+  if (index >= 0) {
+    const found = children[index] as RenderNode
+    return { ...(node as object), children: [...children.slice(0, index), ...replace(found), ...children.slice(index + 1)] } as RenderNode
+  }
   for (let position = children.length - 1; position >= 0; position--) {
-    const replaced = insertBeforeKey(children[position] as RenderNode, key, block)
+    const replaced = replaceKeyed(children[position] as RenderNode, key, replace)
     if (replaced !== null) return { ...(node as object), children: children.map((child, at) => (at === position ? replaced : child)) } as RenderNode
   }
   return null

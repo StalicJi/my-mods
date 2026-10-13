@@ -16,10 +16,10 @@ const BOX_CHROME_COLUMNS = 4
 // 拿掉外框時改用的左右內距：文字留在跟有框時同一欄（框線一格加內距一格），可用寬度也不變
 const BORDERLESS_PADDING_X = 2
 const BORDER_ROWS = 2
-// band 裡畫在這個框下面的其他 mod 大約佔的列數：gitlab-sync 一列；next-steps 的清單顯示時再加它拿掉空白列後的列數
-// （next:、最多 3 個選項、dismiss）。這個 mod 看不到它們畫了什麼，用估計值判斷
-const GITLAB_ROWS = 1
-const NEXT_STEPS_ROWS = 5
+// band 裡畫在這個框下面的其他 mod 有框時大約佔的列數：gitlab-sync 那一段 3 列（框線上下加一列）；
+// next-steps 的清單顯示時再加 7 列（框線上下加 next:、最多 3 個選項、dismiss）。用估計值判斷
+const GITLAB_ROWS = 3
+const NEXT_STEPS_ROWS = 7
 const LABELS = { goal: '◆ Goal: ', now: '  Now: ', next: '  Next: ', wait: '  Wait: ' }
 // 存進 recap 前的安全上限：真正的截斷在畫框時依寬度做，這裡只防模型偶爾寫出一大段
 const MAX_STORED_COLUMNS = 300
@@ -133,7 +133,8 @@ export const register: Register = on => {
 }
 
 // 整排超過 maxRows 時 Claude Code 會把最下面收成「n more」，next-steps 的選項最先被藏起來。
-// 放不下時先拿掉區塊之間的空白列（next-steps 的 gapRows、gitlab-sync 的 gapAboveRows），那樣還放不下，這個框才拿掉上下框線省兩列；改規則要一起看
+// band 的每一段各有一個框，放不下時拿掉框（next-steps 的 hasRoomForFrames 會一起拿掉清單與 gitlab-sync 那一段的框）；
+// 這個框也一樣，整排有框放不下就拿掉上下框線省兩列。改規則要一起看
 export function hasRoomForBorder(maxRows: number, lineCount: number, hasNextSteps: boolean): boolean {
   const rowsBelow = GITLAB_ROWS + (hasNextSteps ? NEXT_STEPS_ROWS : 0)
   return BORDER_ROWS + lineCount + rowsBelow <= maxRows

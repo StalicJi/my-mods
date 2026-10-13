@@ -3,6 +3,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import {
   animationIntervalMs,
   colorRuns,
+  combinedBoxRows,
   cometColor,
   combinedBoxMode,
   errorLines,
@@ -15,6 +16,7 @@ import {
   planLayout,
   planRows,
   planView,
+  rowsOfGitlabLine,
   stepBar,
   titleRow,
   toolLine,
@@ -39,8 +41,8 @@ const STEPS = [
 ] as const
 const DONE_STEPS = STEPS.map(step => ({ ...step, status: 'completed' as const }))
 
-// 代替 mod 底下的 engine
-function engine(on: any) {
+// 代替 mod 底下的 engine；drawBand 換掉 band 底下的內容（例如串接在裡面的 gitlab-sync 那一段）
+function engine(on: any, drawBand?: ($: any, e: any) => unknown) {
   on('session.start', (_$: any, e: any) => ({ sessionId: 's', cwd: e.cwd }))
   on('session.end', () => ({}))
   on('command.register', () => ({ value: undefined }))
@@ -49,6 +51,7 @@ function engine(on: any) {
   on('turn.start', () => ({ turnId: 'turn-1' }))
   on('turn.complete', () => ({ text: '' }))
   on('ui.render', ($: any, e: any) => {
+    if (drawBand !== undefined) return drawBand($, e)
     const { Text } = $.ui.resolve(e)
     return Text({ children: 'engine draws' })
   })
@@ -292,6 +295,49 @@ describe('clean-view', () => {
     expect(await short.find({ type: 'Text', text: /^還有 7 項$/ })).toBeDefined()
     expect(await short.find({ type: 'Text', text: /^步驟 1$/ })).toBeDefined()
     await short.unmount()
+  })
+})
+
+describe('合併框讓出 gitlab-sync 那一段的列數', () => {
+  test('有框 3 列、沒框 1 列、沒有那一段 0 列；往下層找得到', () => {
+    const framed = { type: 'Box', props: { key: 'gitlab-band', borderStyle: 'round', paddingX: 1 }, children: ['GitLab'] }
+    const plain = { type: 'Box', props: { key: 'gitlab-band', paddingX: 2 }, children: ['GitLab'] }
+    const nest = (line: object) => ({ type: 'Box', props: { flexDirection: 'column' }, children: ['rest', { type: 'Box', children: [line] }] })
+    expect(rowsOfGitlabLine(nest(framed) as any)).toBe(3)
+    expect(rowsOfGitlabLine(nest(plain) as any)).toBe(1)
+    expect(rowsOfGitlabLine({ type: 'engine', ref: 0 } as any)).toBe(0)
+    expect(rowsOfGitlabLine('text' as any)).toBe(0)
+  })
+
+  test('有框放不下時合併框與 gitlab-sync 那一段的框一起拿掉，改兩格內距讓文字留在同一欄', async ($, on) => {
+    engine(on, ($: any, e: any) => {
+      const { Box, Text } = $.ui.resolve(e)
+      return Box({ key: 'gitlab-band', borderStyle: 'round', borderColor: 'subtle', paddingX: 1, children: [Text({ children: 'GitLab' })] })
+    })
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+    await reportPlan($, STEPS)
+
+    // 框線 2 + 標題列 1 + 整體進度與 Plan: 2 + 計畫 3 列 + gitlab-sync 有框 3 列 = 11
+    const roomy = await mountBand($, { maxRows: 11 })
+    const [framedBox, framedGitlab] = ((await roomy.drawn()) as any).children
+    expect(framedBox.props).toMatchObject({ borderStyle: 'round', paddingX: 1 })
+    expect(framedGitlab.props).toMatchObject({ borderStyle: 'round', paddingX: 1 })
+    await roomy.unmount()
+
+    const tight = await mountBand($, { maxRows: 10 })
+    const [plainBox, plainGitlab] = ((await tight.drawn()) as any).children
+    expect(plainBox.props.borderStyle).toBeUndefined()
+    expect(plainBox.props.paddingX).toBe(2)
+    expect(plainGitlab.props.borderStyle).toBeUndefined()
+    expect(plainGitlab.props.paddingX).toBe(2)
+    expect(await tight.find({ type: 'Text', text: /跑測試/ })).toBeDefined()
+    await tight.unmount()
+  })
+
+  test('合併框的列數：有框多兩列框線，加上計畫上方的列、整體進度與 Plan: 兩列、計畫各列', () => {
+    // 標題列 1 + 整體進度與 Plan: 2 + 計畫 3 列 = 6，有框再加 2
+    expect(combinedBoxRows(1, 3, true)).toBe(8)
+    expect(combinedBoxRows(1, 3, false)).toBe(6)
   })
 })
 
