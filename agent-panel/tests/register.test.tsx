@@ -99,7 +99,35 @@ function engine(on: any, initialState: Record<string, unknown> = {}) {
     return { value: undefined }
   })
   on('agent.list', () => ({ value: control.listed }))
+  // 代替 Claude Code 自己畫的 band：mod 的 AbovePrompt hook 只記尺寸，往下傳到這裡
+  on('ui.render', { component: 'AbovePrompt' }, ($: any, e: any) => $.ui.resolve(e).Text({ children: 'band' }))
   return control
+}
+
+// 全螢幕版面：不到 110 欄停不到右邊；主畫面版面再寬都停不到
+const NARROW = { columns: 80, rows: 40, isFullscreen: true }
+const WIDE = { columns: 160, rows: 40, isFullscreen: true }
+const MAIN_SCREEN = { columns: 200, rows: 50, isFullscreen: false }
+
+// 代替終端機畫一次 band，mod 從這裡記下尺寸；停不停得到右邊變了的話，mod 會排在畫面之外開或收面板，等它跑完
+async function drawBand($: any, control: any, viewport: object) {
+  const ui = await $.ui.mount({
+    plugin: 'agent-panel', surface: 'terminal', component: 'AbovePrompt', viewport,
+    props: { hasSurvey: false, isWorking: true, maxRows: 10, bodyColumns: 75, scroll: { offset: 0, bodyRows: 9 }, view: {} },
+  } as any)
+  await ui.unmount()
+  await control.clock.settle()
+}
+
+// 代替終端機畫一次面板：停靠時 viewport 只剩對話那一欄（實測 150 欄的終端機是 60）；放到輸入框上方代表視窗變窄
+async function drawPane($: any, control: any, placement: 'dock' | 'inline') {
+  const ui = await $.ui.mount({
+    plugin: 'agent-panel', surface: 'terminal', component: 'Pane', requestId: 'agent-panel',
+    viewport: { columns: 60, rows: 40, isFullscreen: true },
+    props: { title: 'Agents', isFocused: false, bodyColumns: 42, placement, scroll: { offset: 0, bodyRows: 20 }, view: {} },
+  } as any)
+  await ui.unmount()
+  await control.clock.settle()
 }
 
 // 排定的工具結果；{ throws } 代表工具執行時 engine 直接拋例外，排完了回成功
@@ -267,6 +295,122 @@ test('窗格放不下時只提示一次', async ($, on) => {
   expect(control.opens).toHaveLength(2)
   expect(control.toasts).toHaveLength(1)
   expect(JSON.stringify(control.toasts[0])).toContain('子代理面板放不下：打 /agents 開啟')
+})
+
+test('全螢幕而且夠寬時照舊自動開面板', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await drawBand($, control, WIDE)
+  await spawnAgent($)
+  expect(control.opens).toHaveLength(1)
+})
+
+test('面板停不到右邊時派出不開面板，改釘狀態列並提示一次', async ($, on) => {
+  const control = engine(on)
+  await start($, 't1')
+  await drawBand($, control, NARROW)
+  await spawnAgent($)
+  expect(control.opens).toHaveLength(0)
+  expect(control.statuses.at(-1)).toBe('Agents ●1')
+  await $.turn.start({ text: '再來', turnId: 't2' })
+  await spawnAgent($)
+  expect(control.opens).toHaveLength(0)
+  expect(control.toasts).toHaveLength(1)
+  expect(JSON.stringify(control.toasts[0])).toContain('子代理面板放不下：打 /agents 開啟')
+})
+
+test('主畫面版面再寬也不自動開面板', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await drawBand($, control, MAIN_SCREEN)
+  await spawnAgent($)
+  expect(control.opens).toHaveLength(0)
+})
+
+test('先不開的面板在視窗變寬、子代理還在跑時補開', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await drawBand($, control, NARROW)
+  await spawnAgent($)
+  await drawBand($, control, WIDE)
+  expect(control.opens).toHaveLength(1)
+  expect(control.opens[0].focus).toBeUndefined()
+  expect(control.statuses.at(-1)).toBeUndefined()
+})
+
+test('先不開的面板在子代理都完成後，視窗變寬也不補開', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await drawBand($, control, NARROW)
+  await spawnAgent($)
+  await $.turn.complete({ reason: 'answer', answer: '好了', durationMs: 1, agentId: 'a1', turnId: 'x' } as any)
+  await drawBand($, control, WIDE)
+  expect(control.opens).toHaveLength(0)
+})
+
+test('自動開的面板被放到輸入框上方（視窗變窄）時收起、改釘狀態列，變寬再補開', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await drawBand($, control, WIDE)
+  await spawnAgent($)
+  await drawPane($, control, 'inline')
+  expect(control.closes).toHaveLength(1)
+  expect(control.statuses.at(-1)).toBe('Agents ●1')
+  // 收起後 band 量到的是整個終端機的寬度
+  await drawBand($, control, NARROW)
+  await drawBand($, control, WIDE)
+  expect(control.opens).toHaveLength(2)
+})
+
+test('停靠後 band 量到的寬度只剩對話那一欄，也不收起面板、不重開', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await drawBand($, control, WIDE)
+  await spawnAgent($)
+  await drawPane($, control, 'dock')
+  await drawBand($, control, { ...WIDE, columns: 60 })
+  await drawPane($, control, 'dock')
+  await drawBand($, control, { ...WIDE, columns: 60 })
+  expect(control.opens).toHaveLength(1)
+  expect(control.closes).toHaveLength(0)
+})
+
+test('面板停靠著時派出新的一批照舊重開，不因為量到的寬度只剩對話那一欄而改成不開', async ($, on) => {
+  const control = engine(on)
+  await start($, 't1')
+  await drawBand($, control, WIDE)
+  await spawnAgent($)
+  await drawBand($, control, { ...WIDE, columns: 60 })
+  await $.turn.start({ text: '再來', turnId: 't2' })
+  await spawnAgent($)
+  expect(control.opens).toHaveLength(2)
+  expect(control.toasts).toHaveLength(0)
+})
+
+test('用 /agents 開的面板放在輸入框上方也不收', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await drawBand($, control, NARROW)
+  await spawnAgent($)
+  await $.command.run({ command: 'agents', args: '' } as any)
+  expect(control.opens).toHaveLength(1)
+  await drawPane($, control, 'inline')
+  await drawBand($, control, WIDE)
+  expect(control.opens).toHaveLength(1)
+  expect(control.closes).toHaveLength(0)
+})
+
+test('按 ✕ 關掉自動開的面板後，視窗變窄再變寬也不補開', async ($, on) => {
+  const control = engine(on)
+  await start($)
+  await drawBand($, control, WIDE)
+  await spawnAgent($)
+  // 使用者按 ✕：host 把窗格從清單移除（測試工具無法觸發 ui.close）
+  control.panes = []
+  await drawBand($, control, NARROW)
+  await drawBand($, control, WIDE)
+  expect(control.opens).toHaveLength(1)
+  expect(control.closes).toHaveLength(0)
 })
 
 test('平行派出 8 個子代理全部記下', async ($, on) => {

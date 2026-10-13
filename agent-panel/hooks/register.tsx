@@ -1,7 +1,8 @@
 // Agent Panel：派出子代理時跳出面板，顯示這一回合每個子代理在做什麼、模型、用量與時間；
+// 只在面板停得到右邊時自動跳出（窄視窗、主畫面版面不跳，視窗變寬再補開）；
 // 面板沒放上畫面時在輸入框下方釘一行狀態列；/agents 開關
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, Timer, ToolCallInput, UiScrollArgs } from 'claude-code'
+import type { EngineInterface, Register, RenderViewport, Timer, ToolCallInput, UiScrollArgs } from 'claude-code'
 
 import type { AgentRow, Batch, Logs, TokenUsage } from '../types'
 import { addAgent, finishAgent, hasRunning, recordReported, recordStep, recordThinking, recordToolCall, seedRunning } from './batch'
@@ -33,6 +34,8 @@ const SCROLL_ATTEMPTS = 5
 const PANE_TITLE = 'Agents'
 // 停靠在右邊時要求的寬度；放在輸入框上方時 Claude Code 會忽略它
 const PANE_COLUMNS = 42
+// 全螢幕版面的終端機至少要這麼寬，窗格才停靠在右邊；不夠寬或主畫面版面時，Claude Code 把它放在輸入框上方
+const DOCK_MIN_COLUMNS = 110
 const NARROW_HINT = '子代理面板放不下：打 /agents 開啟'
 const AGENTS_USAGE = '用法：/agents 開關子代理面板；/agents focus 把鍵盤交給面板。'
 // 焦點只是請求（輸入框有字、正在對話框裡就不給），$.ui.open 也不回報有沒有給，所以說「要求」
@@ -70,6 +73,10 @@ const CALL_FIELDS = new Set(['tool', 'agentId', 'tool_use_id', 'consent'])
 let currentTurnId: string | null = null
 // 窗格放不下的提示每個 session 最多一次
 let hasWarnedNarrow = false
+// 最近一次畫面時終端機的尺寸與版面；還沒畫過（剛載入）時是 undefined
+let viewport: RenderViewport | undefined
+// mod 自己開面板的情形，見 AutoPanel
+let autoPanel: AutoPanel = 'none'
 let timer: Timer | undefined
 // 上一次送給 $.ui.status 的文字；相同就不再送，每送一次輸入框下方就重畫一次
 let shownStatus: string | undefined | typeof STATUS_UNKNOWN = STATUS_UNKNOWN
@@ -87,6 +94,9 @@ let clearCount = 0
 
 type SpawnFacts = { id: string; description: string; agentType: string; agentName: string | null; isNested: boolean }
 type FinishReason = 'answer' | 'aborted' | 'error' | 'refusal'
+// open：派出新的一批時 mod 自己開了面板；deferred：該自動開，但面板停不到右邊而先不開，等視窗變寬；
+// none：沒有要自動開，或已交給使用者決定（/agents 開關、送出訊息關掉）
+type AutoPanel = 'none' | 'open' | 'deferred'
 // 一次工具呼叫的摘要與開始時間：卡片和詳細頁的紀錄共用同一份
 type ToolStart = { summary: string; at: number }
 // 一個 state 值的讀與帶版本的寫：writeIfChanged 用它比對後才寫
@@ -100,11 +110,69 @@ export async function openPanel($: EngineInterface): Promise<void> {
   // 每次打開面板都從清單開始
   await showList($)
   const opened = await $.ui.open({ id: PANE_ID, title: PANE_TITLE, columns: PANE_COLUMNS })
-  if (!opened.isPlaced && !hasWarnedNarrow) {
-    hasWarnedNarrow = true
-    $.ui.toast(NARROW_HINT)
-  }
+  if (!opened.isPlaced) warnNarrowOnce($)
   await syncTimerAndStatus($)
+}
+
+function warnNarrowOnce($: EngineInterface) {
+  if (hasWarnedNarrow) return
+  hasWarnedNarrow = true
+  $.ui.toast(NARROW_HINT)
+}
+
+// 派出新的一批時：停得到右邊才開。停不到時面板會擠在輸入框上方，佔掉 band 的列數（next-steps 的選項會被收成「n more」），
+// 內容又跟 Claude Code 底部的子代理清單重複，所以先不開、靠狀態列顯示，視窗變寬時再補開（見 noteViewport）。
+// 面板已經開著（上一批自動開的、或使用者開的）就照舊重開，不改 autoPanel：停靠時量到的寬度只剩對話那一欄，不能拿來判斷
+async function showPanelForNewBatch($: EngineInterface) {
+  if (isPanePlaced(await $.ui.panes().catch(() => []))) {
+    await openPanel($)
+    return
+  }
+  if (canDock(viewport)) {
+    autoPanel = 'open'
+    await openPanel($)
+    return
+  }
+  autoPanel = 'deferred'
+  warnNarrowOnce($)
+  await syncTimerAndStatus($)
+}
+
+// 還沒量到尺寸時照舊當成停得到，跟加這個判斷之前一樣
+function canDock(measured: RenderViewport | undefined) {
+  return measured === undefined || (measured.isFullscreen === true && measured.columns >= DOCK_MIN_COLUMNS)
+}
+
+// 畫 band 時記下終端機尺寸；先前沒開的面板在視窗變得停得到右邊時補開。只看「變寬」：面板停靠時 band 量到的寬度
+// 只剩對話那一欄，拿來判斷變窄會把剛停靠的面板收掉、收掉後又補開，來回不停。變窄改看面板自己的 placement（見 collapseIfInline）
+function noteViewport($: EngineInterface, measured: RenderViewport | undefined) {
+  if (measured === undefined) return
+  const couldDock = canDock(viewport)
+  viewport = measured
+  // 畫面時不能寫 state，開面板排到畫面之外
+  if (!couldDock && canDock(measured) && autoPanel === 'deferred') $.clock.after(0, () => void openDeferredPanel($))
+}
+
+// 子代理都完成了就不補開
+async function openDeferredPanel($: EngineInterface) {
+  try {
+    if (autoPanel !== 'deferred') return
+    autoPanel = 'none'
+    if (!hasRunning(await read($, batchAtom))) return
+    autoPanel = 'open'
+    await openPanel($)
+  } catch {
+    // 略過，下次視窗變寬時再試
+  }
+}
+
+// mod 自己開的面板被 Claude Code 放到輸入框上方，代表視窗變窄、停不到右邊了：收起來改看狀態列，變寬時補開。
+// 使用者用 /agents 開的不收；畫面時不能寫 state，關面板排到畫面之外
+function collapseIfInline($: EngineInterface, placement: 'dock' | 'inline') {
+  if (placement !== 'inline' || autoPanel !== 'open') return
+  autoPanel = 'deferred'
+  warnNarrowOnce($)
+  $.clock.after(0, () => void closePanel($))
 }
 
 // 由 mod 關閉，不會清掉「使用者親手開過」的紀錄（使用者按 ✕ 才會）
@@ -270,7 +338,7 @@ async function recordSpawn($: EngineInterface, spawn: SpawnFacts) {
       const forgotten = leftBehind
       await updateLogsIfChanged($, logs => forgetAgents(logs, forgotten)).catch(() => {})
     }
-    if (isNewBatch) await openPanel($)
+    if (isNewBatch) await showPanelForNewBatch($)
     else await syncTimerAndStatus($)
   } catch {
     // 略過
@@ -394,6 +462,7 @@ async function recordUnfinished($: EngineInterface, agentId: string) {
 // /agents focus：ctrl+x tab 遇到輸入框上方有按鈕（例如 next-steps）時會先聚焦那一排，這裡直接把鍵盤交給面板。
 // 面板關著時跟 /agents 一樣從清單開始；開著時保留目前的畫面（例如詳細頁），只要求焦點
 async function focusPanel($: EngineInterface): Promise<{ text: string }> {
+  autoPanel = 'none'
   const panes = await $.ui.panes().catch(() => [])
   if (!isPanePlaced(panes)) await showList($)
   await $.ui.open({ id: PANE_ID, title: PANE_TITLE, columns: PANE_COLUMNS, focus: true })
@@ -511,7 +580,10 @@ export const register: Register = on => {
       // 這一批還有子代理在跑時不關：主管模式下常會邊等子代理邊補指令，面板要留著看進度；全部完成後的下一則訊息才關。
       // 讀不到批次時照舊關閉，不擋住使用者送出的訊息
       const batch = await read($, batchAtom).catch(() => null)
-      if (!hasRunning(batch)) await closePanel($)
+      if (!hasRunning(batch)) {
+        autoPanel = 'none'
+        await closePanel($)
+      }
     }
     return next(e)
   })
@@ -522,6 +594,8 @@ export const register: Register = on => {
     const action = e.args.trim().toLowerCase()
     if (action === 'focus') return focusPanel($)
     if (action !== '') return { text: AGENTS_USAGE }
+    // 使用者自己開關之後，視窗寬度變化就不再替他開或收
+    autoPanel = 'none'
     const panes = await $.ui.panes().catch(() => [])
     if (isPanePlaced(panes)) {
       await closePanel($)
@@ -597,9 +671,16 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // 只為了記下終端機尺寸（決定先前沒開的面板要不要補開），band 的內容原樣交給下一層
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.surface === 'terminal') noteViewport($, e.viewport)
+    return next(e)
+  })
+
   // 面板：第一列是狀態列，下面依 Running → Failed → Done 分組畫卡片，或精簡模式一個子代理一列；版面規則都在 layout.ts。
   // 停靠在右邊時標題列可以點，點了切到那個子代理的詳細頁（紀錄區的組版在 detail.ts）
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
+    if (e.surface === 'terminal') collapseIfInline($, e.props.placement)
     const elements = $.ui.resolve(e)
     const { Box, Text, Button } = elements
     // Raster、Image 只有終端機畫得出來：其他介面的 resolve 照樣給，但畫成空的 fragment，所以看 surface，不畫小人、寬度留給文字
