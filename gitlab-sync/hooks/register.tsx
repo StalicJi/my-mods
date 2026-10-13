@@ -1,4 +1,4 @@
-// GitLab Sync：輸入框下方（提示列底下）一行顯示目前分支跟遠端差幾個 commit，以及自己開的或指派給自己、還開著的張數（GitLab 分 Task、Issue）；
+// GitLab Sync：statusline 時間那一行上面（mod 寫檔、statusline 腳本印出）一行顯示目前分支跟遠端差幾個 commit，以及自己開的或指派給自己、還開著的張數（GitLab 分 Task、Issue）；
 // GitLab 與 GitHub 上自己開的、指派給自己的 issue／MR（PR），以及要自己審查的 MR（PR）有新動態時跳 toast；
 // /gitlab、/github 立即檢查並列出該平台的未讀動態，以及那些還開著的項目（在該平台專案的 repo 裡兩者都只算這個專案的）
 import { atom, read, update } from 'claude-code'
@@ -7,6 +7,7 @@ import type { EngineInterface, HttpResponse, Register, Timer } from 'claude-code
 import type { InboxStatus, KindCount, RepoSync } from '../types'
 import { gitlabProjectOf, pollGitlab } from './gitlab'
 import { githubRepoOf, pollGithub } from './github'
+import { ansiLine } from './statusline'
 import {
   clipColumns,
   columnsWidth,
@@ -44,8 +45,12 @@ const MAX_UNREAD = 50
 const MAX_SEEN_IDS = 500
 const TOAST_MS = 10_000
 const TOAST_COLUMNS = 100
-// 各段之間空兩格、不加「·」，跟 Claude Code 的 statusline 一樣（10/13 使用者要求縮短間距）
-const SEGMENT_SEPARATOR = '  '
+// 這一列交給使用者的 statusline 腳本印在時間那一行上面（10/13 使用者要的位置；mod 能畫的地方都在 statusline 下面）。
+// 每個 session 一個檔，~/.claude/statusline.sh 用 statusline 輸入的 session_id 找檔；檔名格式改了要兩邊一起改
+const STATUS_LINE_DIR = '.claude/gitlab-sync/statusline'
+const STATUS_LINE_SUFFIX = '.txt'
+// 結束的 session 留下的空檔，放超過一天就清掉
+const STATUS_LINE_KEEP_DAYS = 1
 // 來源標示前的平台圖示：Nerd Font 收錄的 Font Awesome 圖示（nf-fa-gitlab、nf-fa-github）。
 // 使用者的終端機字型是 MesloLGM Nerd Font Mono，一個圖示佔一格；沒有 Nerd Font 的字型會顯示成方框
 const GITLAB_ICON = '\u{f296}'
@@ -162,6 +167,7 @@ async function tick($: EngineInterface, isForced: boolean) {
       await syncInbox($, forge)
     }),
   )
+  await publishStatusLine($)
 }
 
 // ── git ───────────────────────────────────────────────
@@ -588,11 +594,21 @@ export const register: Register = (on, options) => {
     startTicking($)
     // 不等它跑完：git fetch 與平台輪詢可能要幾秒，別擋住第一個 prompt
     void runTick($, false).catch(() => {})
+    void removeOldStatusLines($)
     return started
   })
 
-  on('command.run', { command: 'gitlab' }, async $ => ({ text: await checkNow($, GITLAB) }))
-  on('command.run', { command: 'github' }, async $ => ({ text: await checkNow($, GITHUB) }))
+  // 列出未讀會標為已讀，則數跟著變
+  on('command.run', { command: 'gitlab' }, async $ => {
+    const text = await checkNow($, GITLAB)
+    await publishStatusLine($)
+    return { text }
+  })
+  on('command.run', { command: 'github' }, async $ => {
+    const text = await checkNow($, GITHUB)
+    await publishStatusLine($)
+    return { text }
+  })
 
   // Claude 可能剛 commit、push 或切了分支，回合結束就更新一次（只讀本機，不 fetch）
   on('turn.complete', async ($, e, next) => {
@@ -601,28 +617,12 @@ export const register: Register = (on, options) => {
     return completed
   })
 
-  // 10/13 從輸入框上方的 band 搬到這裡：mod 能畫在輸入框下方的只有提示列（PromptHint，「auto mode on」那一行）。
-  // Claude Code 原本那一行保留在上面（模式提示照樣即時更新），這一列接在下面；子代理清單是 Claude Code 自己畫的，
-  // 沒有開放給 mod，所以這一列在清單上面，放不到清單底下。不加框，跟上面的 statusline、提示列同一欄起頭
-  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
-    const hint = await next(e)
-    const segments = footerSegments(await read($, repoSync), await read($, gitlabInbox), await read($, githubInbox))
-    if (segments.length === 0) return hint
-    const { Box, Text } = $.ui.resolve(e)
-    return (
-      <Box flexDirection="column">
-        {hint}
-        <Text wrap="truncate-end">
-          {segments.flatMap((segment, index) =>
-            (segment.spans ?? [segment]).map((span, spanIndex) => (
-              <Text key={`segment-${index}-${spanIndex}`} color={span.color} dimColor={span.isDim} bold={span.isBold}>
-                {`${index > 0 && spanIndex === 0 ? SEGMENT_SEPARATOR : ''}${span.text}`}
-              </Text>
-            )),
-          )}
-        </Text>
-      </Box>
-    )
+  // session 結束（含 /clear）就清空自己的檔，statusline 不留舊內容
+  on('session.end', async ($, e, next) => {
+    const ended = await next(e)
+    const path = await statusLinePath($, e.sessionId)
+    if (path !== null) await $.fs.write(path, '').catch(() => {})
+    return ended
   })
 }
 
@@ -632,4 +632,36 @@ async function refreshAfterTurn($: EngineInterface) {
   } catch {
     // 下一次計時器還會再更新
   }
+  await publishStatusLine($)
+}
+
+// ── statusline ────────────────────────────────────────
+
+async function statusLineDir($: EngineInterface): Promise<string | null> {
+  const home = await $.env.get('HOME')
+  return home ? `${home}/${STATUS_LINE_DIR}` : null
+}
+
+async function statusLinePath($: EngineInterface, sessionId: string): Promise<string | null> {
+  const dir = await statusLineDir($)
+  return dir === null ? null : `${dir}/${sessionId}${STATUS_LINE_SUFFIX}`
+}
+
+// 每一輪都寫，內容沒變也寫：腳本看檔案多久沒更新，判斷這個 session 的 mod 還在不在跑，停用或當掉後不留舊內容。
+// session id 每次重新問：/clear 之後換了新的 id
+async function publishStatusLine($: EngineInterface) {
+  try {
+    const path = await statusLinePath($, await $.session.id())
+    if (path === null) return
+    const segments = footerSegments(await read($, repoSync), await read($, gitlabInbox), await read($, githubInbox))
+    await $.fs.write(path, ansiLine(segments))
+  } catch {
+    // 寫不進去就等下一輪
+  }
+}
+
+async function removeOldStatusLines($: EngineInterface) {
+  const dir = await statusLineDir($)
+  if (dir === null) return
+  await runCommand($, ['find', dir, '-name', `*${STATUS_LINE_SUFFIX}`, '-mtime', `+${STATUS_LINE_KEEP_DAYS}`, '-delete'], GIT_TIMEOUT_MS)
 }

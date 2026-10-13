@@ -27,8 +27,9 @@ claude plugin install agent-supervisor@my-mods
 | 項目 | 設定方式 | 沒設定時 |
 | --- | --- | --- |
 | GitLab 網址 | 在 Claude Code 執行 `/plugin configure gitlab-sync`，填入 `gitlabUrl`（例如 `https://gitlab.example.com`，不含 `/api/v4`）；也可以執行 `echo '{"gitlabUrl":"https://gitlab.example.com"}' \| claude plugin configure gitlab-sync@my-mods --values-stdin` | 不檢查 GitLab |
-| GitLab token | 環境變數 `GITLAB_TOKEN`；或存進 macOS 鑰匙圈：`security add-generic-password -U -a "$USER" -s gitlab-token -w`。環境變數優先，是空的或被拒絕（401）時改讀鑰匙圈 | 輸入框下方顯示「GitLab 通知暫停」（在 GitHub repo 裡不顯示：只顯示目前 repo 所屬平台的新動態與通知暫停） |
+| GitLab token | 環境變數 `GITLAB_TOKEN`；或存進 macOS 鑰匙圈：`security add-generic-password -U -a "$USER" -s gitlab-token -w`。環境變數優先，是空的或被拒絕（401）時改讀鑰匙圈 | 同步狀態列顯示「GitLab 通知暫停」（在 GitHub repo 裡不顯示：只顯示目前 repo 所屬平台的新動態與通知暫停） |
 | GitHub | `gh auth login`，token 跟 gh CLI 共用 | 不檢查 GitHub |
+| 同步狀態列 | mod 把這一列（含 ANSI 顏色）寫到 `~/.claude/gitlab-sync/statusline/<session id>.txt`，每分鐘重寫一次；在自己的 statusline 腳本用輸入的 `session_id` 找檔、檔案 3 分鐘內有更新才印。閒置時 statusline 不會重跑，`settings.json` 的 `statusLine` 要加 `"refreshInterval": 10`（秒） | 看不到同步狀態列（`/gitlab`、`/github` 照常） |
 
 設定值存在這台電腦的 Claude Code 設定裡，不在這個 repo。
 

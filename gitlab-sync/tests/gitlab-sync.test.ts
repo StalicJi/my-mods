@@ -23,7 +23,6 @@ const counts = (task: number, issue: number): KindCount[] => [
   { kind: 'Issue', count: issue },
 ]
 const SYNCED: RepoSync = { branch: 'develop', isDetached: false, upstream: 'origin/develop', ahead: 0, behind: 0, dirtyCount: 0, isFetchFailed: false, remoteHost: 'gitlab.example.com', gitlabProject: 'acme/team/handbook', githubRepo: null }
-const HINT_PROPS = { isDraft: false, isWorking: false, hint: '? for shortcuts' }
 const GITLAB_NAMES = { label: 'GitLab', command: 'gitlab' }
 
 const ISSUE_RAW = {
@@ -324,6 +323,7 @@ const processResult = (exitCode: number, stdout: string) => ({
 })
 
 function engine(on: any) {
+  fakeStatusFiles(on)
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: '/work' }))
   on('command.register', () => ({ value: { command: 'gitlab' } }))
@@ -384,7 +384,7 @@ function captureToasts(on: any): string[] {
 
 // 只回應給定的環境變數，其他都是空的
 function fakeEnv(on: any, values: Record<string, string>) {
-  on('env.get', (_$: any, e: any) => ({ value: values[e.name] }))
+  on('env.get', (_$: any, e: any) => ({ value: e.name === 'HOME' ? TEST_HOME : values[e.name] }))
 }
 
 // 只接受 fresh-token 的 GitLab：其他 token 一律 401
@@ -397,16 +397,29 @@ async function start($: any, on: any) {
 
 const runGitlab = async ($: any): Promise<string> => (await $.command.run({ command: 'gitlab', args: '' } as any)).text
 
-async function footerText($: any, surface: 'terminal' | 'desktop' = 'terminal'): Promise<string> {
-  const ui = await $.ui.mount({ plugin: 'gitlab-sync', surface, component: 'PromptHint', props: HINT_PROPS } as any)
-  const texts: string[] = []
-  const walk = (node: any) => {
-    if (typeof node === 'string') texts.push(node)
-    else if (node && typeof node === 'object') (Array.isArray(node) ? node : [node.children]).flat().forEach(walk)
-  }
-  walk(await ui.find({ type: 'Box' }))
-  await ui.unmount()
-  return texts.join('')
+// mod 寫給 statusline 腳本的檔（hooks/register.tsx 的 publishStatusLine），測試裡存在記憶體
+const TEST_HOME = '/home/tester'
+const SESSION_ID = 'session-1'
+const statusFiles = new Map<string, string>()
+const ANSI_CODES = /\x1b\[[0-9;]*m/g
+
+function fakeStatusFiles(on: any) {
+  statusFiles.clear()
+  on('session.id', () => ({ value: SESSION_ID }))
+  on('fs.write', (_$: any, e: any) => {
+    statusFiles.set(e.path, e.text)
+    return { value: undefined }
+  })
+}
+
+// 這個 session 那個檔的內容；env.get 替身把 HOME 也回成 token 時路徑前綴不同，只比對結尾
+function statusLineOf(): string {
+  const entry = [...statusFiles].find(([path]) => path.endsWith(`/statusline/${SESSION_ID}.txt`))
+  return entry?.[1] ?? ''
+}
+
+async function footerText(): Promise<string> {
+  return statusLineOf().replace(ANSI_CODES, '')
 }
 
 describe('整合情境', () => {
@@ -415,7 +428,7 @@ describe('整合情境', () => {
     mock.store(on)
     const toasts = captureToasts(on)
     const requests: { url: string; token: string | undefined }[] = []
-    on('env.get', (_$: any, e: any) => ({ value: e.name === 'GITLAB_TOKEN' ? 'test-token' : undefined }))
+    on('env.get', (_$: any, e: any) => ({ value: e.name === 'GITLAB_TOKEN' ? 'test-token' : e.name === 'HOME' ? TEST_HOME : undefined }))
     fakeCommands(on,() => ({ root: '/work-a', branch: 'develop', upstream: 'origin/develop', counts: '0\t0', status: '' }))
     let notes: unknown[] = []
     fakeGitlab(
@@ -442,7 +455,7 @@ describe('整合情境', () => {
     expect(report).toContain('GitLab 新動態 1 則（已標為已讀）：')
     expect(report).toContain('bob 在 web-app#5 留言：謝謝回報，查清楚了。')
     expect(report).toContain(`${ISSUE_RAW.web_url}#note_9551`)
-    expect(await footerText($)).not.toContain('則新動態')
+    expect(await footerText()).not.toContain('則新動態')
     expect(await runGitlab($)).toContain('GitLab 新動態 0 則。')
 
     expect(requests.length).toBeGreaterThan(0)
@@ -537,7 +550,7 @@ describe('整合情境', () => {
       expect(requests.some(request => request.url.includes(`/issues?scope=${scope}&state=opened&`))).toBe(true)
     }
     // 沒有 remote 的 repo：底部那一列標「本機」，不顯示全部專案加總的張數
-    const footer = await footerText($)
+    const footer = await footerText()
     expect(footer).toContain('本機  ✓ 已同步')
     expect(footer).not.toContain(' 張（/gitlab）')
   })
@@ -569,20 +582,20 @@ describe('整合情境', () => {
     const report = await runGitlab($)
     expect(report).toContain('這個 repo（web-app）裡你開的或指派給你、還開著的 Issue 1 張：\n• web-app#5')
     expect(report).not.toContain('api-server')
-    expect(await footerText($)).toContain('Task 0 張  Issue 1 張（/gitlab）')
+    expect(await footerText()).toContain('Task 0 張  Issue 1 張（/gitlab）')
 
     // 換到一張都沒有的專案：回合結束只讀本機就重算，不必等下一次輪詢
     repo = { ...siteRepo, root: '/work-l', remotes: { gitlab: `${GITLAB_URL}/acme/team/handbook.git` } }
     await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1 } as any)
     await clock.advance(0)
-    expect(await footerText($)).toContain('Task 0 張  Issue 0 張（/gitlab）')
+    expect(await footerText()).toContain('Task 0 張  Issue 0 張（/gitlab）')
     expect(await runGitlab($)).toContain('這個 repo（handbook）裡你開的或指派給你、還開著的 Task 0 張。\n這個 repo（handbook）裡你開的或指派給你、還開著的 Issue 0 張。')
 
     // remote 在 GitHub：/gitlab 不分專案全部列；底部那一列標 GitHub、不顯示張數
     repo = { ...siteRepo, root: '/work-m', remotes: { gitlab: 'git@github.com:someone/repo.git' } }
     const all = await runGitlab($)
     expect(all).toContain('\n你開的或指派給你、還開著的 Issue 2 張：')
-    const githubFooter = await footerText($)
+    const githubFooter = await footerText()
     expect(githubFooter).toContain(`${GITHUB_MARK}  ✓ 已同步`)
     expect(githubFooter).not.toContain(' 張（/gitlab）')
   })
@@ -626,26 +639,26 @@ describe('整合情境', () => {
     siteNotes = [{ id: 9551, system: false, body: '謝謝回報', created_at: iso(T0 + 60_000), author: BOB }]
     await clock.advance(2 * 60_000)
     expect(toasts).toContain('GitLab：bob 在 web-app#5 留言：謝謝回報（到 web-app 用 /gitlab 查看）')
-    expect(await footerText($)).toContain('GitLab 1 則新動態（/gitlab）')
+    expect(await footerText()).toContain('GitLab 1 則新動態（/gitlab）')
 
     mrNotes = [{ id: 9601, system: false, body: '看起來可以', created_at: iso(T0 + 180_000), author: BOB }]
     await clock.advance(2 * 60_000)
     expect(toasts).toContain('GitLab：bob 在 api-server!3 留言：看起來可以')
-    expect(await footerText($)).toContain('GitLab 2 則新動態（/gitlab）')
+    expect(await footerText()).toContain('GitLab 2 則新動態（/gitlab）')
 
     const report = await runGitlab($)
     expect(report).toContain('這個 repo（api-server）裡 GitLab 新動態 2 則（已標為已讀）：')
     expect(report).toContain('bob 在 api-server!3 留言：看起來可以')
     expect(report).toContain('bob 在 old#1 留言：舊留言')
     expect(report).not.toContain('web-app#5')
-    expect(await footerText($)).not.toContain('則新動態')
+    expect(await footerText()).not.toContain('則新動態')
     expect(await runGitlab($)).toContain('這個 repo（api-server）裡 GitLab 新動態 0 則。')
 
     // 別的專案的那則還沒讀：換到那個 repo，回合結束就算進底部那一列，/gitlab 列得到
     repo = { ...deviceRepo, root: '/work-o', remotes: { origin: `${GITLAB_URL}/acme/web/web-app.git` } }
     await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1 } as any)
     await clock.advance(0)
-    expect(await footerText($)).toContain('GitLab 1 則新動態（/gitlab）')
+    expect(await footerText()).toContain('GitLab 1 則新動態（/gitlab）')
     const siteReport = await runGitlab($)
     expect(siteReport).toContain('這個 repo（web-app）裡 GitLab 新動態 1 則（已標為已讀）：')
     expect(siteReport).toContain('bob 在 web-app#5 留言：謝謝回報')
@@ -667,29 +680,28 @@ describe('整合情境', () => {
     await start($, on)
     await clock.advance(0)
     expect(toasts).toContain('GitLab 有 1 則未讀動態（/gitlab 查看），其他專案還有 1 則（web-app）')
-    expect(await footerText($)).toContain('GitLab 1 則新動態（/gitlab）')
+    expect(await footerText()).toContain('GitLab 1 則新動態（/gitlab）')
   })
 
-  test('底部那一列接在 Claude Code 的提示列下面：原本那一行保留在上面，這一列不加框、不上底色', OPTIONS, async ($, on) => {
+  test('這一列寫成檔給 statusline 腳本：每個 session 一個檔，在 ~/.claude/gitlab-sync/statusline，顏色用 ANSI 色碼', OPTIONS, async ($, on) => {
     mock.clock(on, { now: T0 })
     mock.store(on)
-    on('env.get', () => ({ value: 'test-token' }))
-    fakeCommands(on, () => ({ root: '/work-q', branch: 'main', upstream: 'origin/main', counts: '0\t0', status: '' }))
+    on('env.get', (_$: any, e: any) => ({ value: e.name === 'GITLAB_TOKEN' ? 'test-token' : e.name === 'HOME' ? TEST_HOME : undefined }))
+    fakeCommands(on, () => ({ root: '/work-q', branch: 'main', upstream: 'origin/main', counts: '0\t0', status: '', remotes: { origin: 'http://gitlab.test/acme/handbook.git' } }))
     fakeGitlab(on, path => (path === '/user' ? ME : []))
 
     await start($, on)
-    for (const surface of ['terminal', 'desktop'] as const) {
-      const ui = await $.ui.mount({ plugin: 'gitlab-sync', surface, component: 'PromptHint', props: HINT_PROPS } as any)
-      const drawn = JSON.stringify(await ui.drawn())
-      expect(drawn.indexOf('engine draws')).toBeGreaterThanOrEqual(0)
-      expect(drawn.indexOf('engine draws')).toBeLessThan(drawn.indexOf('✓ 已同步'))
-      const boxes = await ui.findAll({ type: 'Box' })
-      expect(boxes.some(box => box.props.borderStyle !== undefined || box.props.backgroundColor !== undefined)).toBe(false)
-      await ui.unmount()
-    }
+    await runGitlab($)
+    const line = statusFiles.get(`${TEST_HOME}/.claude/gitlab-sync/statusline/${SESSION_ID}.txt`) ?? ''
+    // GitLab 用 Claude 橘、已同步綠色、0 張的數字綠色粗體，結尾重設顏色
+    expect(line).toContain('\x1b[38;2;215;119;87m' + GITLAB_MARK)
+    expect(line).toContain('\x1b[38;2;78;186;101m  ✓ 已同步')
+    expect(line).toContain('\x1b[1;38;2;78;186;101m0')
+    expect(line.endsWith('\x1b[0m')).toBe(true)
+    expect(line).not.toContain('\n')
   })
 
-  test('沒有東西要顯示（不在 repo、沒有新動態也沒暫停）時提示列照 Claude Code 原樣，不多一列', OPTIONS, async ($, on) => {
+  test('沒有東西要顯示（不在 repo、沒有新動態也沒暫停）時寫空檔，statusline 就不印這一行', OPTIONS, async ($, on) => {
     mock.clock(on, { now: T0 })
     mock.store(on)
     on('env.get', () => ({ value: 'test-token' }))
@@ -698,16 +710,47 @@ describe('整合情境', () => {
     fakeGitlab(on, path => (path === '/user' ? ME : []))
 
     await start($, on)
-    const ui = await $.ui.mount({ plugin: 'gitlab-sync', surface: 'terminal', component: 'PromptHint', props: HINT_PROPS } as any)
-    expect(await ui.findAll({ type: 'Text', text: /GitLab|GitHub|已同步/ })).toEqual([])
-    await ui.unmount()
+    await runGitlab($)
+    expect(statusFiles.size).toBeGreaterThan(0)
+    expect(statusLineOf()).toBe('')
+  })
+
+  test('session 結束（含 /clear）就清空自己的檔，statusline 不留舊內容', OPTIONS, async ($, on) => {
+    mock.clock(on, { now: T0 })
+    mock.store(on)
+    on('env.get', () => ({ value: 'test-token' }))
+    on('session.end', (_$: any, e: any) => ({ sessionId: e.sessionId }))
+    fakeCommands(on, () => ({ root: '/work-q', branch: 'main', upstream: 'origin/main', counts: '0\t0', status: '' }))
+    fakeGitlab(on, path => (path === '/user' ? ME : []))
+
+    await start($, on)
+    await runGitlab($)
+    expect(await footerText()).toContain('✓ 已同步')
+    await $.session.end({ reason: 'clear', sessionId: SESSION_ID, resume: { id: SESSION_ID } } as any)
+    expect(statusLineOf()).toBe('')
+  })
+
+  test('啟動時清掉放超過一天的舊檔（結束的 session 留下的空檔）', OPTIONS, async ($, on) => {
+    mock.clock(on, { now: T0 })
+    mock.store(on)
+    on('env.get', (_$: any, e: any) => ({ value: e.name === 'HOME' ? TEST_HOME : undefined }))
+    const commands: string[][] = []
+    on('process.run', (_$: any, e: any) => {
+      commands.push([...e.argv])
+      return processResult(128, '')
+    })
+    fakeGitlab(on, path => (path === '/user' ? ME : []))
+
+    await start($, on)
+    await runGitlab($)
+    expect(commands).toContainEqual(['find', `${TEST_HOME}/.claude/gitlab-sync/statusline`, '-name', '*.txt', '-mtime', '+1', '-delete'])
   })
 
   test('底部那一列的還開著的 issue 張數：背景輪詢會更新，查不到或通知暫停時不留舊數字', OPTIONS, async ($, on) => {
     const clock = mock.clock(on, { now: T0 })
     mock.store(on)
     let token: string | undefined = 'test-token'
-    on('env.get', () => ({ value: token }))
+    on('env.get', (_$: any, e: any) => ({ value: e.name === 'HOME' ? TEST_HOME : token }))
     const remotes = { origin: `${GITLAB_URL}/acme/web/web-app.git` }
     fakeCommands(on, () => ({ root: '/work-g', branch: 'main', upstream: 'origin/main', counts: '0\t0', status: '', remotes }))
     let createdByMe: unknown[] = [ISSUE_RAW, { ...ISSUE_RAW, id: 48, iid: 6 }]
@@ -721,26 +764,26 @@ describe('整合情境', () => {
 
     await start($, on)
     await clock.advance(0)
-    expect(await footerText($)).toContain(`${GITLAB_MARK}  ✓ 已同步  Task 0 張  Issue 2 張（/gitlab）`)
+    expect(await footerText()).toContain(`${GITLAB_MARK}  ✓ 已同步  Task 0 張  Issue 2 張（/gitlab）`)
 
     // 背景每兩分鐘輪詢一次，關掉一張就少一張
     createdByMe = [ISSUE_RAW]
     await clock.advance(2 * 60_000)
-    expect(await footerText($)).toContain('Issue 1 張（/gitlab）')
+    expect(await footerText()).toContain('Issue 1 張（/gitlab）')
 
     // 只有這一段查不到：不顯示張數，也不算通知暫停
     isOpenQueryBroken = true
     await clock.advance(2 * 60_000)
-    expect(await footerText($)).not.toContain('Issue ')
-    expect(await footerText($)).not.toContain('通知暫停')
+    expect(await footerText()).not.toContain('Issue ')
+    expect(await footerText()).not.toContain('通知暫停')
 
     isOpenQueryBroken = false
     await clock.advance(2 * 60_000)
-    expect(await footerText($)).toContain('Issue 1 張（/gitlab）')
+    expect(await footerText()).toContain('Issue 1 張（/gitlab）')
 
     token = undefined
     await clock.advance(2 * 60_000)
-    const paused = await footerText($)
+    const paused = await footerText()
     expect(paused).toContain('GitLab 通知暫停（/gitlab 看原因）')
     expect(paused).not.toContain('Issue ')
   })
@@ -764,7 +807,7 @@ describe('整合情境', () => {
     mock.clock(on, { now: T0 })
     mock.store(on)
     const toasts = captureToasts(on)
-    on('env.get', () => ({ value: undefined }))
+    on('env.get', (_$: any, e: any) => ({ value: e.name === 'HOME' ? TEST_HOME : undefined }))
     fakeCommands(on,() => ({ root: '/work-b', branch: 'main', upstream: 'origin/main', counts: '1\t0', status: '' }))
     fakeGitlab(on, () => undefined)
 
@@ -774,7 +817,7 @@ describe('整合情境', () => {
     expect(report).toContain('GitLab 通知暫停：GITLAB_TOKEN 是空的，鑰匙圈也讀不到 gitlab-token')
     expect(report).not.toContain('還開著的')
     expect(toasts.filter(text => text.startsWith('GitLab 通知暫停'))).toHaveLength(1)
-    expect(await footerText($)).toContain('GitLab 通知暫停（/gitlab 看原因）')
+    expect(await footerText()).toContain('GitLab 通知暫停（/gitlab 看原因）')
   })
 
   test('環境變數的 token 被拒絕（401）時改用鑰匙圈的最新 token，之後沿用、不再每輪讀鑰匙圈', OPTIONS, async ($, on) => {
@@ -841,11 +884,11 @@ describe('整合情境', () => {
     keychain.token = 'revoked-token'
     await clock.advance(2 * 60_000)
     expect(requests.some(request => request.token === 'revoked-token')).toBe(true)
-    expect(await footerText($)).toContain('GitLab 通知暫停（/gitlab 看原因）')
+    expect(await footerText()).toContain('GitLab 通知暫停（/gitlab 看原因）')
 
     keychain.token = 'fresh-token'
     await clock.advance(2 * 60_000)
-    expect(await footerText($)).not.toContain('通知暫停')
+    expect(await footerText()).not.toContain('通知暫停')
   })
 
   test('遠端多了新 commit 時提醒一次；回合結束就重讀本機狀態；分支名稱與未提交的檔案數交給 statusline，不顯示', OPTIONS, async ($, on) => {
@@ -861,7 +904,7 @@ describe('整合情境', () => {
 
     await start($, on)
     await clock.advance(0)
-    const footer = await footerText($)
+    const footer = await footerText()
     expect(footer).toContain('本機  ✓ 已同步')
     expect(footer).not.toContain('develop')
     expect(footer).not.toContain('未提交')
@@ -870,13 +913,13 @@ describe('整合情境', () => {
     behind = 2
     await clock.advance(5 * 60_000)
     expect(toasts.filter(text => text === 'origin/develop 多了 2 個新 commit，本機落後 2 個')).toHaveLength(1)
-    expect(await footerText($)).toContain('↓2 待 pull')
+    expect(await footerText()).toContain('↓2 待 pull')
 
     // Claude 在回合裡 commit 了：回合結束就更新，不等下一輪計時器
     ahead = 1
     await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1 } as any)
     await clock.advance(0)
-    expect(await footerText($)).toContain('↑1 ↓2 分岔')
+    expect(await footerText()).toContain('↑1 ↓2 分岔')
   })
 
   test('這台電腦沒設定 GitLab 網址：GitLab 部分整個不顯示、不讀 token、不連線，/gitlab 說明怎麼設定', async ($, on) => {
@@ -892,7 +935,7 @@ describe('整合情境', () => {
 
     await start($, on)
     await clock.advance(0)
-    const footer = await footerText($)
+    const footer = await footerText()
     // 認不出是 GitLab，來源直接寫主機名稱；沒有通知暫停也沒有 Issue 張數
     expect(footer).toContain('gitlab.example.com  ✓ 已同步')
     expect(footer).not.toContain('GitLab')

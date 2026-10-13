@@ -17,7 +17,6 @@ const OCTO = { id: 583, login: 'octocat' }
 const ME_USER = { id: ME.id, username: ME.login }
 const REPO_URL = 'https://api.github.com/repos/alice/notes-app'
 const NO_INBOX: InboxStatus = { unreadCount: 0, problem: null, openCounts: null }
-const HINT_PROPS = { isDraft: false, isWorking: false, hint: '? for shortcuts' }
 
 const issueRaw = (number: number, title: string, user: typeof ME, assignees: (typeof ME)[] = [], extra: Record<string, unknown> = {}) => ({
   id: 9000 + number,
@@ -211,11 +210,12 @@ function captureToasts(on: any): string[] {
 }
 
 async function start($: any, on: any) {
+  fakeStatusFiles(on)
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: '/work-gh' }))
   on('command.register', (_$: any, e: any) => ({ value: { command: e.name } }))
   on('fs.stat', () => ({ deny: 'ENOENT' }))
-  on('env.get', (_$: any, e: any) => ({ value: e.name === 'GITLAB_TOKEN' ? 'gitlab-token' : undefined }))
+  on('env.get', (_$: any, e: any) => ({ value: e.name === 'GITLAB_TOKEN' ? 'gitlab-token' : e.name === 'HOME' ? TEST_HOME : undefined }))
   on('ui.render', ($: any, e: any) => {
     const { Text } = $.ui.resolve(e)
     return Text({ children: 'engine draws' })
@@ -225,16 +225,29 @@ async function start($: any, on: any) {
 
 const runGithub = async ($: any): Promise<string> => (await $.command.run({ command: 'github', args: '' } as any)).text
 
-async function footerText($: any, surface: 'terminal' | 'desktop' = 'terminal'): Promise<string> {
-  const ui = await $.ui.mount({ plugin: 'gitlab-sync', surface, component: 'PromptHint', props: HINT_PROPS } as any)
-  const texts: string[] = []
-  const walk = (node: any) => {
-    if (typeof node === 'string') texts.push(node)
-    else if (node && typeof node === 'object') (Array.isArray(node) ? node : [node.children]).flat().forEach(walk)
-  }
-  walk(await ui.find({ type: 'Box' }))
-  await ui.unmount()
-  return texts.join('')
+// mod 寫給 statusline 腳本的檔（hooks/register.tsx 的 publishStatusLine），測試裡存在記憶體
+const TEST_HOME = '/home/tester'
+const SESSION_ID = 'session-1'
+const statusFiles = new Map<string, string>()
+const ANSI_CODES = /\x1b\[[0-9;]*m/g
+
+function fakeStatusFiles(on: any) {
+  statusFiles.clear()
+  on('session.id', () => ({ value: SESSION_ID }))
+  on('fs.write', (_$: any, e: any) => {
+    statusFiles.set(e.path, e.text)
+    return { value: undefined }
+  })
+}
+
+// 這個 session 那個檔的內容；env.get 替身把 HOME 也回成 token 時路徑前綴不同，只比對結尾
+function statusLineOf(): string {
+  const entry = [...statusFiles].find(([path]) => path.endsWith(`/statusline/${SESSION_ID}.txt`))
+  return entry?.[1] ?? ''
+}
+
+async function footerText(): Promise<string> {
+  return statusLineOf().replace(ANSI_CODES, '')
 }
 
 describe('整合情境', () => {
@@ -263,7 +276,7 @@ describe('整合情境', () => {
 
     await start($, on)
     await clock.advance(0)
-    expect(await footerText($)).toContain(`${GITHUB_MARK}  ✓ 已同步  Issue 1 張（/github）`)
+    expect(await footerText()).toContain(`${GITHUB_MARK}  ✓ 已同步  Issue 1 張（/github）`)
 
     timeline = [commented(7001, OCTO, '我這邊也重現了', T0 + 60_000)]
     await clock.advance(3 * 60_000)
@@ -275,7 +288,7 @@ describe('整合情境', () => {
     expect(report).toContain('octocat 在 notes-app#3 留言：我這邊也重現了')
     expect(report).toContain('https://github.com/alice/notes-app/issues/3#issuecomment-7001')
     expect(report).toContain('這個 repo（notes-app）裡你開的或指派給你、還開著的 Issue 1 張：\n• notes-app#3  報表數字對不上\n  你開的，還沒指派')
-    expect(await footerText($)).not.toContain('則新動態')
+    expect(await footerText()).not.toContain('則新動態')
     expect(await runGithub($)).toContain('這個 repo（notes-app）裡 GitHub 新動態 0 則。')
 
     // token 只走 Authorization header，網址裡沒有；只打 GitHub API
@@ -344,7 +357,7 @@ describe('整合情境', () => {
 
     await start($, on)
     await clock.advance(0)
-    const footer = await footerText($)
+    const footer = await footerText()
     expect(footer).toContain(`${GITHUB_MARK}  ✓ 已同步`)
     expect(footer).not.toContain('GitHub 通知暫停')
     expect(footer).not.toContain('Issue ')
@@ -373,12 +386,12 @@ describe('整合情境', () => {
 
     await start($, on)
     await clock.advance(0)
-    expect(await footerText($)).toContain('GitHub 通知暫停（/github 看原因）')
+    expect(await footerText()).toContain('GitHub 通知暫停（/github 看原因）')
     expect(toasts).toContain('GitHub 通知暫停：GitHub token 無效或已過期（HTTP 401），在終端機執行 gh auth login 重新登入')
 
     gh.token = 'fresh-token'
     await clock.advance(2 * 60_000)
-    const footer = await footerText($)
+    const footer = await footerText()
     expect(footer).not.toContain('通知暫停')
     expect(footer).toContain('Issue 1 張（/github）')
     // 被拒絕後下一輪才重新向 gh 要 token，不是每輪都要
