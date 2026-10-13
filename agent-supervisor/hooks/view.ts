@@ -1,6 +1,9 @@
 // 面板的版面：把狀態組成一列一列的文字片段（Span），register.tsx 只負責畫出來。
 // 每一列都依顯示寬度截斷在面板寬度內，窄的 cmux 分割窗格也不會折行
 import type { AgentPhase, AgentRecord, MainLoop, TaskRecord, TaskStatus, WaitingReports } from '../types'
+import { blockedSubjects, detectBlockers, suggestActions } from './blockers'
+import type { Blocker } from './blockers'
+import { agentName, ownerName } from './names'
 import { taskProgress } from './tasks'
 import { displayWidth, fitToWidth, formatDuration, padToWidth } from './text'
 
@@ -37,6 +40,7 @@ const UNKNOWN_TEXT = 'Unknown'
 const DEFAULT_MAX_AGENTS = 6
 const DEFAULT_MAX_TASKS = 6
 const TASK_MARKS: Record<TaskStatus, string> = { completed: '[x]', in_progress: '[>]', pending: '[ ]' }
+const STUCK_MARK = '[!]'
 // 進行中的排前面，已完成的排後面
 const TASK_ORDER: Record<TaskStatus, number> = { in_progress: 0, pending: 1, completed: 2 }
 const NO_TASKS = 'Unknown：還沒有代理回報任務'
@@ -50,32 +54,32 @@ export function agentStatus(agent: AgentRecord, isBlocked = false): DisplayStatu
   return { label: PHASE_LABELS[agent.phase], isInferred: agent.source === 'inferred' }
 }
 
-// 標題：Agent({ name }) 給的名字；這個環境的 Agent 工具通常沒有 name，就用任務說明，都沒有才用類型
-export function agentName(agent: AgentRecord): string {
-  return agent.name ?? (agent.description || agent.agentType)
-}
-
 export function overviewRows(model: OverviewModel, options: ViewOptions): Row[] {
-  const rows: Row[] = [...mainRows(model.mainLoop, options.columns)]
+  const blockers = detectBlockers(model)
+  const blocked = blockedSubjects(blockers)
+  const rows: Row[] = [...mainRows(model.mainLoop, blocked.has('main'), options.columns)]
   // 什麼都還沒有：只寫一行說明，不畫空的區塊
   if (model.agents.length === 0 && model.tasks.length === 0) {
     rows.push(blankRow(), [{ text: EMPTY_HINT, isDim: true }])
     return fitRows(rows, options.columns)
   }
-  const sorted = sortAgents(model.agents)
+  const sorted = sortAgents(model.agents, blocked)
   const shown = sorted.slice(0, options.maxAgents ?? DEFAULT_MAX_AGENTS)
   rows.push(blankRow(), sectionRow('AGENTS'))
   if (shown.length === 0) rows.push([{ text: INDENT + EMPTY_HINT, isDim: true }])
-  for (const agent of shown) rows.push(...agentRows(agent, agentStatus(agent), options))
+  for (const agent of shown) rows.push(...agentRows(agent, agentStatus(agent, blocked.has(agent.id)), options))
   const hiddenCount = sorted.length - shown.length
   if (hiddenCount > 0) rows.push([{ text: `${INDENT}還有 ${hiddenCount} 個代理`, isDim: true }])
-  rows.push(blankRow(), ...tasksRows(model, options))
+  rows.push(blankRow(), ...tasksRows(model, blockers, options))
+  if (blockers.length > 0) rows.push(blankRow(), ...attentionRows(blockers, model))
+  const suggestions = suggestActions(model, blockers)
+  if (suggestions.length > 0) rows.push(blankRow(), sectionRow('SUGGESTED ACTION'), ...suggestions.map(text => [{ text: `→ ${text}` }]))
   if (shown.some(agent => agentStatus(agent).isInferred)) rows.push(blankRow(), [{ text: INFERRED_LEGEND, isDim: true }])
   return fitRows(rows, options.columns)
 }
 
 // 任務區：完成數與百分比只算回報過的任務；每項寫狀態、id、標題、負責人，等別的任務的註明
-export function tasksRows(model: OverviewModel, options: ViewOptions): Row[] {
+export function tasksRows(model: OverviewModel, blockers: readonly Blocker[], options: ViewOptions): Row[] {
   const progress = taskProgress(model.tasks)
   if (progress === null) return [sectionRow('TASKS'), [{ text: INDENT + NO_TASKS, isDim: true }]]
   const sorted = model.tasks
@@ -83,35 +87,30 @@ export function tasksRows(model: OverviewModel, options: ViewOptions): Row[] {
     .sort((left, right) => TASK_ORDER[left.task.status] - TASK_ORDER[right.task.status] || left.index - right.index)
     .map(entry => entry.task)
   const shown = sorted.slice(0, options.maxTasks ?? DEFAULT_MAX_TASKS)
+  // 確認卡住的任務標 [!]
+  const stuckTaskIds = new Set(blockers.filter(blocker => blocker.certainty === 'confirmed' && blocker.taskId !== null).map(blocker => blocker.taskId))
   const rows: Row[] = [
     sectionRow('TASKS'),
     [{ text: `${INDENT}Completed: ${progress.completed} / ${progress.total} · Progress: ${progress.percent}%`, isDim: true }],
-    ...shown.map(task => taskRow(task, model)),
+    ...shown.map(task => taskRow(task, model, stuckTaskIds.has(task.id))),
   ]
   const hiddenCount = sorted.length - shown.length
   if (hiddenCount > 0) rows.push([{ text: `${INDENT}還有 ${hiddenCount} 項任務`, isDim: true }])
   return rows
 }
 
-function taskRow(task: TaskRecord, model: OverviewModel): Row {
+function taskRow(task: TaskRecord, model: OverviewModel, isStuck: boolean): Row {
   const pending = task.blockedBy.filter(id => model.tasks.find(other => other.id === id)?.status !== 'completed')
   const waitingNote = task.status !== 'completed' && pending.length > 0 ? `（等 ${pending.join('、')}）` : ''
   return [
-    { text: `${INDENT}${TASK_MARKS[task.status]} `, isDim: task.status === 'completed' },
+    isStuck ? { text: `${INDENT}${STUCK_MARK} `, color: 'warning' } : { text: `${INDENT}${TASK_MARKS[task.status]} `, isDim: task.status === 'completed' },
     { text: `${task.id} ${task.title}`, isDim: task.status === 'completed', isBold: task.status === 'in_progress' },
     { text: ` · ${ownerName(task.owner, model.agents)}${waitingNote}`, isDim: true },
   ]
 }
 
-// 負責人顯示名稱：主對話是 Supervisor，代理用面板上的標題，對不到的原樣寫
-export function ownerName(owner: string, agents: readonly AgentRecord[]): string {
-  if (owner === 'main') return 'Supervisor'
-  const agent = agents.find(candidate => candidate.id === owner)
-  return agent === undefined ? owner : agentName(agent)
-}
-
-function mainRows(mainLoop: MainLoop, columns: number): Row[] {
-  const status: DisplayStatus = { label: mainLoop.isRunning ? 'RUNNING' : 'IDLE', isInferred: false }
+function mainRows(mainLoop: MainLoop, isBlocked: boolean, columns: number): Row[] {
+  const status: DisplayStatus = { label: isBlocked ? 'BLOCKED' : mainLoop.isRunning ? 'RUNNING' : 'IDLE', isInferred: false }
   const detail = mainLoop.isRunning ? mainLoop.activity || '處理中' : '等你下指令'
   return [titleRow('Supervisor', status, columns), detailRow(detail, null, columns)]
 }
@@ -134,11 +133,27 @@ function elapsedText(agent: AgentRecord, now: number): string {
   return end === null ? UNKNOWN_TEXT : formatDuration(end - agent.startedAt)
 }
 
-export function sortAgents(agents: readonly AgentRecord[]): AgentRecord[] {
+export function sortAgents(agents: readonly AgentRecord[], blocked: ReadonlySet<string> = new Set()): AgentRecord[] {
+  const order = (agent: AgentRecord) => DISPLAY_ORDER[agentStatus(agent, blocked.has(agent.id)).label]
   return agents
     .map((agent, index) => ({ agent, index }))
-    .sort((left, right) => DISPLAY_ORDER[agentStatus(left.agent).label] - DISPLAY_ORDER[agentStatus(right.agent).label] || left.index - right.index)
+    .sort((left, right) => order(left.agent) - order(right.agent) || left.index - right.index)
     .map(entry => entry.agent)
+}
+
+// 阻塞區：每一條兩列，第一列誰被誰擋住（可能的標 POSSIBLE BLOCKER），第二列原因
+function attentionRows(blockers: readonly Blocker[], model: OverviewModel): Row[] {
+  const name = (subject: string) => ownerName(subject, model.agents)
+  return [
+    sectionRow('ATTENTION'),
+    ...blockers.flatMap((blocker): Row[] => {
+      const title =
+        blocker.certainty === 'possible'
+          ? { text: `? POSSIBLE BLOCKER：${name(blocker.subject)}`, color: 'warning', isDim: true }
+          : { text: `⚠ ${name(blocker.subject)}${blocker.dependsOn === null ? '' : ` 被 ${name(blocker.dependsOn)} 擋住`}`, color: 'warning', isBold: true }
+      return [[title], [{ text: INDENT + blocker.reason, isDim: true }]]
+    }),
+  ]
 }
 
 // 第一列：狀態符號、名稱，狀態字靠右

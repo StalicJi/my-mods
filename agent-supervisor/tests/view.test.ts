@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { addSpawn, finishAgent, reconcile, recordActivity } from '../hooks/agents'
+import { addSpawn, finishAgent, reconcile, recordActivity, recordToolOutcome } from '../hooks/agents'
 import { displayWidth } from '../hooks/text'
 import { agentStatus, overviewRows } from '../hooks/view'
 import type { AgentRecord, MainLoop, TaskRecord } from '../types'
@@ -124,5 +124,43 @@ describe('任務區', () => {
   test('主對話負責的任務寫 Supervisor', () => {
     const rows = rowsText(overviewRows({ ...EMPTY, tasks: [task('T1', 'pending')], mainLoop: MAIN_IDLE }, { columns: 60, now: 0 }))
     expect(rows).toContain('  [ ] T1 標題 T1 · Supervisor')
+  })
+})
+
+describe('阻塞與建議', () => {
+  const pair = () => addSpawn(addSpawn([], spawn('b', { name: 'backend' })), spawn('f', { name: 'frontend' }))
+
+  test('確認被擋住的代理顯示 BLOCKED；ATTENTION 寫誰被誰擋住與原因；SUGGESTED ACTION 寫下一步', () => {
+    const tasks = [task('B1', 'in_progress', { owner: 'b', title: '定義 API schema' }), task('F1', 'in_progress', { owner: 'f', title: '前端畫面', blockedBy: ['B1'] })]
+    const rows = rowsText(overviewRows({ ...EMPTY, agents: pair(), tasks, mainLoop: MAIN_IDLE }, { columns: 60, now: 0 }))
+    expect(rows.some(row => /frontend.*BLOCKED$/.test(row))).toBe(true)
+    expect(rows.some(row => /backend.*RUNNING$/.test(row))).toBe(true)
+    expect(rows).toContain('  [!] F1 前端畫面 · frontend（等 B1）')
+    const attention = rows.indexOf('ATTENTION')
+    expect(rows[attention + 1]).toBe('⚠ frontend 被 backend 擋住')
+    expect(rows[attention + 2]).toBe('  「前端畫面」要等「定義 API schema」')
+    const suggestion = rows.indexOf('SUGGESTED ACTION')
+    expect(rows[suggestion + 1]).toBe('→ 先完成「定義 API schema」（backend），frontend 才能繼續')
+  })
+
+  test('可能的阻塞標 POSSIBLE BLOCKER，不改代理狀態', () => {
+    let agents = pair()
+    for (let count = 0; count < 3; count++) agents = recordToolOutcome(agents, 'b', { outcome: 'error', errorLine: 'Exit code 1' })
+    const rows = rowsText(overviewRows({ ...EMPTY, agents, mainLoop: MAIN_IDLE }, { columns: 60, now: 0 }))
+    expect(rows.some(row => /backend.*RUNNING$/.test(row))).toBe(true)
+    const attention = rows.indexOf('ATTENTION')
+    expect(rows[attention + 1]).toBe('? POSSIBLE BLOCKER：backend')
+    expect(rows[attention + 2]).toBe('  連續 3 次工具失敗：Exit code 1')
+  })
+
+  test('主對話回報在等什麼時 Supervisor 顯示 BLOCKED', () => {
+    const rows = rowsText(overviewRows({ ...EMPTY, agents: pair(), waiting: { main: { text: '等你決定資料庫', at: 0 } }, mainLoop: MAIN_IDLE }, { columns: 60, now: 0 }))
+    expect(rows[0]).toMatch(/Supervisor.*BLOCKED$/)
+  })
+
+  test('沒有阻塞也沒有建議時不畫這兩區', () => {
+    const rows = rowsText(overviewRows({ ...EMPTY, agents: pair(), mainLoop: MAIN_IDLE }, { columns: 60, now: 0 }))
+    expect(rows).not.toContain('ATTENTION')
+    expect(rows).not.toContain('SUGGESTED ACTION')
   })
 })
