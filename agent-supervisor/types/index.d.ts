@@ -43,12 +43,33 @@ export type MainLoop = {
   activityAt: number | null
 }
 
+export type TaskStatus = 'pending' | 'in_progress' | 'completed'
+
+// 代理回報（report 工具）或 Claude Code 原生任務工具（TaskCreate／TaskUpdate／TodoWrite）留下的任務；不自行編造
+export type TaskRecord = {
+  // 回報的 id；原生 TaskCreate 的 id 加「#」，TodoWrite 的是「回報者:todo:序號」
+  id: string
+  title: string
+  status: TaskStatus
+  // 負責人：主對話是 'main'，代理是 agentId；回報的名字對不到任何代理時原樣保留
+  owner: string
+  // 要先完成的任務 id
+  blockedBy: string[]
+  source: 'report' | 'native'
+  updatedAt: number
+}
+
+// 代理或主對話回報「在等什麼」（report 工具的 waitingFor）；鍵是回報者：'main' 或 agentId
+export type WaitingReports = Record<string, { text: string; at: number }>
+
 declare module 'claude-code' {
   interface PluginState {
     'agent-supervisor': {
       view: SupervisorView
       agents: AgentRecord[]
       mainLoop: MainLoop
+      tasks: TaskRecord[]
+      waiting: WaitingReports
       // 計時器每一拍加一，只有面板讀，用來更新經過時間
       tick: number
     }

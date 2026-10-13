@@ -1,6 +1,7 @@
 // 面板的版面：把狀態組成一列一列的文字片段（Span），register.tsx 只負責畫出來。
 // 每一列都依顯示寬度截斷在面板寬度內，窄的 cmux 分割窗格也不會折行
-import type { AgentPhase, AgentRecord, MainLoop } from '../types'
+import type { AgentPhase, AgentRecord, MainLoop, TaskRecord, TaskStatus, WaitingReports } from '../types'
+import { taskProgress } from './tasks'
 import { displayWidth, fitToWidth, formatDuration, padToWidth } from './text'
 
 export type Span = { text: string; color?: string; isDim?: boolean; isBold?: boolean }
@@ -8,8 +9,8 @@ export type Row = Span[]
 export type StatusLabel = 'RUNNING' | 'IDLE' | 'BLOCKED' | 'COMPLETED' | 'FAILED' | 'UNKNOWN'
 // isInferred：推測的狀態（不是事件或 Claude Code 確認的），畫面上加「?」
 export type DisplayStatus = { label: StatusLabel; isInferred: boolean }
-export type OverviewModel = { agents: readonly AgentRecord[]; mainLoop: MainLoop }
-export type ViewOptions = { columns: number; now: number; maxAgents?: number }
+export type OverviewModel = { agents: readonly AgentRecord[]; mainLoop: MainLoop; tasks: readonly TaskRecord[]; waiting: WaitingReports }
+export type ViewOptions = { columns: number; now: number; maxAgents?: number; maxTasks?: number }
 
 type StatusStyle = { mark: string; color?: string; isDim?: boolean }
 
@@ -34,6 +35,11 @@ const INFERRED_MARK = '?'
 const INDENT = '  '
 const UNKNOWN_TEXT = 'Unknown'
 const DEFAULT_MAX_AGENTS = 6
+const DEFAULT_MAX_TASKS = 6
+const TASK_MARKS: Record<TaskStatus, string> = { completed: '[x]', in_progress: '[>]', pending: '[ ]' }
+// 進行中的排前面，已完成的排後面
+const TASK_ORDER: Record<TaskStatus, number> = { in_progress: 0, pending: 1, completed: 2 }
+const NO_TASKS = 'Unknown：還沒有代理回報任務'
 // 第二列放得下說明的最少欄數；更窄時不放經過時間
 const MIN_DETAIL_COLUMNS = 6
 const EMPTY_HINT = '這個 session 還沒有派出子代理'
@@ -51,18 +57,57 @@ export function agentName(agent: AgentRecord): string {
 
 export function overviewRows(model: OverviewModel, options: ViewOptions): Row[] {
   const rows: Row[] = [...mainRows(model.mainLoop, options.columns)]
-  if (model.agents.length === 0) {
+  // 什麼都還沒有：只寫一行說明，不畫空的區塊
+  if (model.agents.length === 0 && model.tasks.length === 0) {
     rows.push(blankRow(), [{ text: EMPTY_HINT, isDim: true }])
     return fitRows(rows, options.columns)
   }
   const sorted = sortAgents(model.agents)
   const shown = sorted.slice(0, options.maxAgents ?? DEFAULT_MAX_AGENTS)
   rows.push(blankRow(), sectionRow('AGENTS'))
+  if (shown.length === 0) rows.push([{ text: INDENT + EMPTY_HINT, isDim: true }])
   for (const agent of shown) rows.push(...agentRows(agent, agentStatus(agent), options))
   const hiddenCount = sorted.length - shown.length
   if (hiddenCount > 0) rows.push([{ text: `${INDENT}還有 ${hiddenCount} 個代理`, isDim: true }])
+  rows.push(blankRow(), ...tasksRows(model, options))
   if (shown.some(agent => agentStatus(agent).isInferred)) rows.push(blankRow(), [{ text: INFERRED_LEGEND, isDim: true }])
   return fitRows(rows, options.columns)
+}
+
+// 任務區：完成數與百分比只算回報過的任務；每項寫狀態、id、標題、負責人，等別的任務的註明
+export function tasksRows(model: OverviewModel, options: ViewOptions): Row[] {
+  const progress = taskProgress(model.tasks)
+  if (progress === null) return [sectionRow('TASKS'), [{ text: INDENT + NO_TASKS, isDim: true }]]
+  const sorted = model.tasks
+    .map((task, index) => ({ task, index }))
+    .sort((left, right) => TASK_ORDER[left.task.status] - TASK_ORDER[right.task.status] || left.index - right.index)
+    .map(entry => entry.task)
+  const shown = sorted.slice(0, options.maxTasks ?? DEFAULT_MAX_TASKS)
+  const rows: Row[] = [
+    sectionRow('TASKS'),
+    [{ text: `${INDENT}Completed: ${progress.completed} / ${progress.total} · Progress: ${progress.percent}%`, isDim: true }],
+    ...shown.map(task => taskRow(task, model)),
+  ]
+  const hiddenCount = sorted.length - shown.length
+  if (hiddenCount > 0) rows.push([{ text: `${INDENT}還有 ${hiddenCount} 項任務`, isDim: true }])
+  return rows
+}
+
+function taskRow(task: TaskRecord, model: OverviewModel): Row {
+  const pending = task.blockedBy.filter(id => model.tasks.find(other => other.id === id)?.status !== 'completed')
+  const waitingNote = task.status !== 'completed' && pending.length > 0 ? `（等 ${pending.join('、')}）` : ''
+  return [
+    { text: `${INDENT}${TASK_MARKS[task.status]} `, isDim: task.status === 'completed' },
+    { text: `${task.id} ${task.title}`, isDim: task.status === 'completed', isBold: task.status === 'in_progress' },
+    { text: ` · ${ownerName(task.owner, model.agents)}${waitingNote}`, isDim: true },
+  ]
+}
+
+// 負責人顯示名稱：主對話是 Supervisor，代理用面板上的標題，對不到的原樣寫
+export function ownerName(owner: string, agents: readonly AgentRecord[]): string {
+  if (owner === 'main') return 'Supervisor'
+  const agent = agents.find(candidate => candidate.id === owner)
+  return agent === undefined ? owner : agentName(agent)
 }
 
 function mainRows(mainLoop: MainLoop, columns: number): Row[] {

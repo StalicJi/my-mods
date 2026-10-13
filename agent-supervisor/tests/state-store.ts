@@ -1,6 +1,6 @@
 // 測試的 $ 沒有 state 名詞：代替 host 保存 agent-supervisor 的 state，照 ifVersion 檢查版本，
 // update 遇到版本衝突時才會重試，平行寫入的測試才有意義（改寫自已刪除的 agent-panel 測試工具）
-export const STATE_KEYS = ['view', 'agents', 'mainLoop', 'tasks', 'events', 'tick'] as const
+export const STATE_KEYS = ['view', 'agents', 'mainLoop', 'tasks', 'waiting', 'events', 'tick'] as const
 
 export function stateStore(on: any, initial: Record<string, unknown> = {}) {
   const held = new Map<string, { value: unknown; version: number }>()

@@ -18,6 +18,8 @@ export function engine(on: any, initialState: Record<string, unknown> = {}) {
     panes: [] as Pane[],
     spawnReplies: [] as SpawnReply[],
     spawned: 0,
+    // 每次派出時送到 engine 的 prompt（mod 附加說明之後的）
+    spawnPrompts: [] as string[],
     toolReplies: [] as object[],
     listed: [] as object[],
     listCalls: 0,
@@ -49,7 +51,10 @@ export function engine(on: any, initialState: Record<string, unknown> = {}) {
     control.statuses.push(e.text)
     return { value: undefined }
   })
-  on('agent.spawn', () => control.spawnReplies.shift() ?? { model: 'claude-opus-5-5', agentId: `a${++control.spawned}` })
+  on('agent.spawn', (_$: any, e: any) => {
+    control.spawnPrompts.push(e.prompt)
+    return control.spawnReplies.shift() ?? { model: 'claude-opus-5-5', agentId: `a${++control.spawned}` }
+  })
   on('agent.list', () => {
     control.listCalls++
     return { value: control.listed }
