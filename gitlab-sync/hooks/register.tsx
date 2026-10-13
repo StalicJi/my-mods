@@ -50,8 +50,8 @@ const BAND_FRAME = { borderStyle: 'round', borderColor: 'subtle', paddingX: 1 } 
 const BAND_PADDING_X = 2
 // 有框時這一段佔的列數：框線上下各一列加這一列
 const FRAMED_ROWS = 3
-// 這一段的 key：next-steps 靠它找到這一段，把清單插在它上面，整排放不下時也由它拿掉這裡的框
-// （next-steps/hooks/register.tsx 的 GITLAB_BAND_KEY），改名要兩邊一起改
+// 這一段的 key：clean-view 靠它找到這一段，合併框讓出它的列數，整排放不下時也由它拿掉這裡的框
+// （clean-view/hooks/register.tsx 的 GITLAB_BAND_KEY），改名要兩邊一起改
 const BAND_KEY = 'gitlab-band'
 // 背景跑的 git 不能停在密碼提示，連不上就直接失敗
 const GIT_ENV = { GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' }
@@ -623,8 +623,7 @@ export const register: Register = (on, options) => {
         )}
       </Text>
     )
-    // 排在 band 最下面，緊貼輸入框：其他 mod 與 Claude Code 的內容都在上面。
-    // 串接順序上包在這個 mod 外面、又要接在最後的 next-steps，會把清單插在這一段上面
+    // 排在 band 最下面，緊貼輸入框：其他 mod 與 Claude Code 的內容都在上面
     return (
       <Box flexDirection="column">
         {rest}
@@ -636,7 +635,7 @@ export const register: Register = (on, options) => {
   })
 }
 
-// 這個 mod 只看得到自己這一段：放得下就加框。上面還有 next 清單時，整排放不放得下由 next-steps 判斷，放不下會一起拿掉這裡的框
+// 這個 mod 只看得到自己這一段：放得下就加框。上面還有 clean-view 的合併框時，整排放不放得下由 clean-view 判斷，放不下會一起拿掉這裡的框
 export function bandFrame(maxRows: number): { paddingX: number; borderStyle?: string; borderColor?: string } {
   return FRAMED_ROWS <= maxRows ? { ...BAND_FRAME } : { paddingX: BAND_PADDING_X }
 }
