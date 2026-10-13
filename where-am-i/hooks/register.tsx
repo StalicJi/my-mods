@@ -133,7 +133,7 @@ export const register: Register = on => {
 }
 
 // 整排超過 maxRows 時 Claude Code 會把最下面收成「n more」，next-steps 的選項最先被藏起來。
-// next-steps 放不下時先拿掉自己的空白列（next-steps 的 gapRows），那樣還放不下，這個框才拿掉上下框線省兩列；改規則要兩邊一起看
+// 放不下時先拿掉區塊之間的空白列（next-steps 的 gapRows、gitlab-sync 的 gapAboveRows），那樣還放不下，這個框才拿掉上下框線省兩列；改規則要一起看
 export function hasRoomForBorder(maxRows: number, lineCount: number, hasNextSteps: boolean): boolean {
   const rowsBelow = GITLAB_ROWS + (hasNextSteps ? NEXT_STEPS_ROWS : 0)
   return BORDER_ROWS + lineCount + rowsBelow <= maxRows

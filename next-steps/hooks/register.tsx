@@ -265,10 +265,12 @@ export const register: Register = (on, options) => {
   })
 }
 
-// 整排超過 maxRows 時 Claude Code 會把最下面收成「n more」，最先被藏起來的就是這裡的選項，
-// 所以放不下時先拿掉上面的空白列。where-am-i 判斷要不要拿掉外框時，把這裡算成沒有空白列，改規則要兩邊一起看
+// 清單上面空一列，跟 gitlab-sync 那一列上面的空白列一樣，摘要框、清單、gitlab-sync 那一列三段等距。
+// 整排超過 maxRows 時 Claude Code 會把最下面收成「n more」，最先被藏起來的就是這裡的選項，所以放不下時兩列空白一起拿掉：
+// gitlab-sync 的 gapAboveRows 用同樣的估算；where-am-i 判斷要不要拿掉外框時，把這裡算成沒有空白列。改規則要三邊一起看
 export function gapRows(maxRows: number, listRows: number): number {
-  return OTHER_BAND_ROWS + 1 + listRows <= maxRows ? 1 : 0
+  const gapCount = 2
+  return OTHER_BAND_ROWS + listRows + gapCount <= maxRows ? 1 : 0
 }
 
 // 在 tree 裡找 key 為 key 的元素，把 block 插在它前面，回傳換過的 tree；找不到回傳 null。

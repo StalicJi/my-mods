@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { gitlabProjectOf, noteEvents, stateEvents, toItem, toNote, toOpenIssue, workItemKind } from '../hooks/gitlab'
 import type { GitlabItem, GitlabNote } from '../hooks/gitlab'
-import { bandSegments, remoteSegment, repoReport, startupToastText, toastText } from '../hooks/register'
+import { bandSegments, gapAboveRows, remoteSegment, repoReport, startupToastText, toastText } from '../hooks/register'
 import { clipColumns, describeEvent, excerptOf, formatAgo, groupByKind, inProject, openIssueLines, remoteHostOf } from '../hooks/shared'
 import type { ForgeEvent } from '../hooks/shared'
 import type { InboxStatus, KindCount, RepoSync } from '../types'
@@ -703,6 +703,29 @@ describe('整合情境', () => {
     expect(last.props).toMatchObject({ key: 'gitlab-band' })
     expect(JSON.stringify(drawn).indexOf('engine draws')).toBeLessThan(JSON.stringify(drawn).indexOf('⎇ main'))
     await ui.unmount()
+  })
+
+  test('跟上面的區塊之間空一列；整排放不下時拿掉，next 清單顯示時估算多算清單與一列空白', OPTIONS, async ($, on) => {
+    // 摘要框 5 + 這一列 1 + 空白 1 = 7；加上 next 清單 5 與第二列空白 = 13
+    expect(gapAboveRows(7, false)).toBe(1)
+    expect(gapAboveRows(6, false)).toBe(0)
+    expect(gapAboveRows(13, true)).toBe(1)
+    expect(gapAboveRows(12, true)).toBe(0)
+
+    mock.clock(on, { now: T0 })
+    mock.store(on)
+    on('env.get', () => ({ value: 'test-token' }))
+    on('state.get', { plugin: 'next-steps', key: 'active' }, () => ({ value: { value: true, version: 1 } }))
+    fakeCommands(on, () => ({ root: '/work-q', branch: 'main', upstream: 'origin/main', counts: '0\t0', status: '' }))
+    fakeGitlab(on, path => (path === '/user' ? ME : []))
+
+    await start($, on)
+    for (const [maxRows, gap] of [[13, 1], [12, 0]] as const) {
+      const ui = await $.ui.mount({ plugin: 'gitlab-sync', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND_PROPS, maxRows } } as any)
+      const band = await ui.find({ type: 'Box', key: 'gitlab-band' })
+      expect(band?.props.marginTop).toBe(gap)
+      await ui.unmount()
+    }
   })
 
   test('band 的還開著的 issue 張數：背景輪詢會更新，查不到或通知暫停時不留舊數字', OPTIONS, async ($, on) => {

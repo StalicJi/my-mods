@@ -157,10 +157,13 @@ function gapCount(node: any): number {
 const bandWith = (maxRows: number) => ({ ...BAND, surface: 'terminal', props: { ...BAND.props, maxRows, scroll: { offset: 0, bodyRows: maxRows } } })
 
 describe('band 放不下時拿掉「next:」上面的空白列', () => {
-  test('其他 mod 估 6 列加空白列與清單放得下才空一列', () => {
+  test('其他 mod 估 6 列，加上清單與兩列空白（清單上面、gitlab-sync 那一列上面）放得下才空', () => {
     // 兩個建議：next:、兩個選項、dismiss 共 4 列
-    expect(gapRows(11, 4)).toBe(1)
-    expect(gapRows(10, 4)).toBe(0)
+    expect(gapRows(12, 4)).toBe(1)
+    expect(gapRows(11, 4)).toBe(0)
+    // 三個建議跟 gitlab-sync 的估算一樣在 13 列切換
+    expect(gapRows(13, 5)).toBe(1)
+    expect(gapRows(12, 5)).toBe(0)
   })
 
   test('放得下時空一列，放不下時不空', async ($, on) => {
@@ -168,11 +171,11 @@ describe('band 放不下時拿掉「next:」上面的空白列', () => {
     await finishTurn($)
     await wait()
 
-    const roomy = await $.ui.mount(bandWith(11) as any)
+    const roomy = await $.ui.mount(bandWith(12) as any)
     expect(gapCount(await roomy.drawn())).toBe(1)
     await roomy.unmount()
 
-    const tight = await $.ui.mount(bandWith(10) as any)
+    const tight = await $.ui.mount(bandWith(11) as any)
     expect(gapCount(await tight.drawn())).toBe(0)
     // 空白列拿掉了，選項照樣都在
     expect(await tight.find({ type: 'Button', text: /提交/ })).toBeDefined()
@@ -189,12 +192,12 @@ describe('band 放不下時拿掉「next:」上面的空白列', () => {
     void finishTurn($)
     await wait()
 
-    const roomy = await $.ui.mount(bandWith(8) as any)
+    const roomy = await $.ui.mount(bandWith(9) as any)
     expect(await roomy.find({ type: 'Text', text: /next steps…/ })).toBeDefined()
     expect(gapCount(await roomy.drawn())).toBe(1)
     await roomy.unmount()
 
-    const tight = await $.ui.mount(bandWith(7) as any)
+    const tight = await $.ui.mount(bandWith(8) as any)
     expect(gapCount(await tight.drawn())).toBe(0)
     await tight.unmount()
   })
