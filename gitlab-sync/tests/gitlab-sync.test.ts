@@ -323,7 +323,7 @@ const processResult = (exitCode: number, stdout: string) => ({
 })
 
 function engine(on: any) {
-  captureStatus(on)
+  fakeStatusFiles(on)
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: '/work' }))
   on('command.register', () => ({ value: { command: 'gitlab' } }))
@@ -384,7 +384,7 @@ function captureToasts(on: any): string[] {
 
 // 只回應給定的環境變數，其他都是空的
 function fakeEnv(on: any, values: Record<string, string>) {
-  on('env.get', (_$: any, e: any) => ({ value: values[e.name] }))
+  on('env.get', (_$: any, e: any) => ({ value: e.name === 'HOME' ? TEST_HOME : values[e.name] }))
 }
 
 // 只接受 fresh-token 的 GitLab：其他 token 一律 401
@@ -397,19 +397,29 @@ async function start($: any, on: any) {
 
 const runGitlab = async ($: any): Promise<string> => (await $.command.run({ command: 'gitlab', args: '' } as any)).text
 
-// mod 用 $.ui.status 釘的那一行（hooks/register.tsx 的 publishStatus），測試裡記在記憶體
-const statusCalls: (string | undefined)[] = []
+// mod 寫給 statusline 腳本的檔（hooks/register.tsx 的 publishStatusLine），測試裡存在記憶體
+const TEST_HOME = '/home/tester'
+const SESSION_ID = 'session-1'
+const statusFiles = new Map<string, string>()
+const ANSI_CODES = /\x1b\[[0-9;]*m/g
 
-function captureStatus(on: any) {
-  statusCalls.length = 0
-  on('ui.status', (_$: any, e: any) => {
-    statusCalls.push(e.text)
+function fakeStatusFiles(on: any) {
+  statusFiles.clear()
+  on('session.id', () => ({ value: SESSION_ID }))
+  on('fs.write', (_$: any, e: any) => {
+    statusFiles.set(e.path, e.text)
     return { value: undefined }
   })
 }
 
+// 這個 session 那個檔的內容；env.get 替身把 HOME 也回成 token 時路徑前綴不同，只比對結尾
+function statusLineOf(): string {
+  const entry = [...statusFiles].find(([path]) => path.endsWith(`/statusline/${SESSION_ID}.txt`))
+  return entry?.[1] ?? ''
+}
+
 async function footerText(): Promise<string> {
-  return statusCalls.at(-1) ?? ''
+  return statusLineOf().replace(ANSI_CODES, '')
 }
 
 describe('整合情境', () => {
@@ -418,7 +428,7 @@ describe('整合情境', () => {
     mock.store(on)
     const toasts = captureToasts(on)
     const requests: { url: string; token: string | undefined }[] = []
-    on('env.get', (_$: any, e: any) => ({ value: e.name === 'GITLAB_TOKEN' ? 'test-token' : undefined }))
+    on('env.get', (_$: any, e: any) => ({ value: e.name === 'GITLAB_TOKEN' ? 'test-token' : e.name === 'HOME' ? TEST_HOME : undefined }))
     fakeCommands(on,() => ({ root: '/work-a', branch: 'develop', upstream: 'origin/develop', counts: '0\t0', status: '' }))
     let notes: unknown[] = []
     fakeGitlab(
@@ -673,33 +683,25 @@ describe('整合情境', () => {
     expect(await footerText()).toContain('GitLab 1 則新動態（/gitlab）')
   })
 
-  test('這一行用 $.ui.status 釘在 statusline 上面：純文字、各段空兩格，不帶色碼（色碼會被印成亂碼）', OPTIONS, async ($, on) => {
+  test('這一列寫成檔給 statusline 腳本：每個 session 一個檔，在 ~/.claude/gitlab-sync/statusline，顏色用 ANSI 色碼', OPTIONS, async ($, on) => {
     mock.clock(on, { now: T0 })
     mock.store(on)
-    on('env.get', () => ({ value: 'test-token' }))
-    fakeCommands(on, () => ({ root: '/work-q', branch: 'main', upstream: 'origin/main', counts: '0\t0', status: '', remotes: { origin: `${GITLAB_URL}/acme/handbook.git` } }))
+    on('env.get', (_$: any, e: any) => ({ value: e.name === 'GITLAB_TOKEN' ? 'test-token' : e.name === 'HOME' ? TEST_HOME : undefined }))
+    fakeCommands(on, () => ({ root: '/work-q', branch: 'main', upstream: 'origin/main', counts: '0\t0', status: '', remotes: { origin: 'http://gitlab.test/acme/handbook.git' } }))
     fakeGitlab(on, path => (path === '/user' ? ME : []))
 
     await start($, on)
     await runGitlab($)
-    expect(await footerText()).toBe(`${GITLAB_MARK}  ✓ 已同步  Task 0 張  Issue 0 張（/gitlab）`)
-    expect(statusCalls.some(text => text?.includes(String.fromCharCode(27)))).toBe(false)
+    const line = statusFiles.get(`${TEST_HOME}/.claude/gitlab-sync/statusline/${SESSION_ID}.txt`) ?? ''
+    // GitLab 用 Claude 橘、已同步綠色、0 張的數字綠色粗體，結尾重設顏色
+    expect(line).toContain('\x1b[38;2;215;119;87m' + GITLAB_MARK)
+    expect(line).toContain('\x1b[38;2;78;186;101m  ✓ 已同步')
+    expect(line).toContain('\x1b[1;38;2;78;186;101m0')
+    expect(line.endsWith('\x1b[0m')).toBe(true)
+    expect(line).not.toContain('\n')
   })
 
-  test('內容沒變就不重送，免得每一輪都重畫', OPTIONS, async ($, on) => {
-    mock.clock(on, { now: T0 })
-    mock.store(on)
-    on('env.get', () => ({ value: 'test-token' }))
-    fakeCommands(on, () => ({ root: '/work-q', branch: 'main', upstream: 'origin/main', counts: '0\t0', status: '' }))
-    fakeGitlab(on, path => (path === '/user' ? ME : []))
-
-    await start($, on)
-    await runGitlab($)
-    await runGitlab($)
-    expect(new Set(statusCalls).size).toBe(statusCalls.length)
-  })
-
-  test('沒有東西要顯示（不在 repo、沒有新動態也沒暫停）時清掉這一行', OPTIONS, async ($, on) => {
+  test('沒有東西要顯示（不在 repo、沒有新動態也沒暫停）時寫空檔，statusline 就不印這一行', OPTIONS, async ($, on) => {
     mock.clock(on, { now: T0 })
     mock.store(on)
     on('env.get', () => ({ value: 'test-token' }))
@@ -709,15 +711,46 @@ describe('整合情境', () => {
 
     await start($, on)
     await runGitlab($)
-    expect(statusCalls.length).toBeGreaterThan(0)
-    expect(statusCalls.at(-1)).toBeUndefined()
+    expect(statusFiles.size).toBeGreaterThan(0)
+    expect(statusLineOf()).toBe('')
+  })
+
+  test('session 結束（含 /clear）就清空自己的檔，statusline 不留舊內容', OPTIONS, async ($, on) => {
+    mock.clock(on, { now: T0 })
+    mock.store(on)
+    on('env.get', () => ({ value: 'test-token' }))
+    on('session.end', (_$: any, e: any) => ({ sessionId: e.sessionId }))
+    fakeCommands(on, () => ({ root: '/work-q', branch: 'main', upstream: 'origin/main', counts: '0\t0', status: '' }))
+    fakeGitlab(on, path => (path === '/user' ? ME : []))
+
+    await start($, on)
+    await runGitlab($)
+    expect(await footerText()).toContain('✓ 已同步')
+    await $.session.end({ reason: 'clear', sessionId: SESSION_ID, resume: { id: SESSION_ID } } as any)
+    expect(statusLineOf()).toBe('')
+  })
+
+  test('啟動時清掉放超過一天的舊檔（結束的 session 留下的空檔）', OPTIONS, async ($, on) => {
+    mock.clock(on, { now: T0 })
+    mock.store(on)
+    on('env.get', (_$: any, e: any) => ({ value: e.name === 'HOME' ? TEST_HOME : undefined }))
+    const commands: string[][] = []
+    on('process.run', (_$: any, e: any) => {
+      commands.push([...e.argv])
+      return processResult(128, '')
+    })
+    fakeGitlab(on, path => (path === '/user' ? ME : []))
+
+    await start($, on)
+    await runGitlab($)
+    expect(commands).toContainEqual(['find', `${TEST_HOME}/.claude/gitlab-sync/statusline`, '-name', '*.txt', '-mtime', '+1', '-delete'])
   })
 
   test('底部那一列的還開著的 issue 張數：背景輪詢會更新，查不到或通知暫停時不留舊數字', OPTIONS, async ($, on) => {
     const clock = mock.clock(on, { now: T0 })
     mock.store(on)
     let token: string | undefined = 'test-token'
-    on('env.get', () => ({ value: token }))
+    on('env.get', (_$: any, e: any) => ({ value: e.name === 'HOME' ? TEST_HOME : token }))
     const remotes = { origin: `${GITLAB_URL}/acme/web/web-app.git` }
     fakeCommands(on, () => ({ root: '/work-g', branch: 'main', upstream: 'origin/main', counts: '0\t0', status: '', remotes }))
     let createdByMe: unknown[] = [ISSUE_RAW, { ...ISSUE_RAW, id: 48, iid: 6 }]
@@ -774,7 +807,7 @@ describe('整合情境', () => {
     mock.clock(on, { now: T0 })
     mock.store(on)
     const toasts = captureToasts(on)
-    on('env.get', () => ({ value: undefined }))
+    on('env.get', (_$: any, e: any) => ({ value: e.name === 'HOME' ? TEST_HOME : undefined }))
     fakeCommands(on,() => ({ root: '/work-b', branch: 'main', upstream: 'origin/main', counts: '1\t0', status: '' }))
     fakeGitlab(on, () => undefined)
 
