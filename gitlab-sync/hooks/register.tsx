@@ -1,4 +1,4 @@
-// GitLab Sync：輸入框上方一行顯示目前分支跟遠端差幾個 commit，以及自己開的或指派給自己、還開著的張數（GitLab 分 Task、Issue）；
+// GitLab Sync：輸入框下方（提示列底下）一行顯示目前分支跟遠端差幾個 commit，以及自己開的或指派給自己、還開著的張數（GitLab 分 Task、Issue）；
 // GitLab 與 GitHub 上自己開的、指派給自己的 issue／MR（PR），以及要自己審查的 MR（PR）有新動態時跳 toast；
 // /gitlab、/github 立即檢查並列出該平台的未讀動態，以及那些還開著的項目（在該平台專案的 repo 裡兩者都只算這個專案的）
 import { atom, read, update } from 'claude-code'
@@ -44,15 +44,8 @@ const MAX_UNREAD = 50
 const MAX_SEEN_IDS = 500
 const TOAST_MS = 10_000
 const TOAST_COLUMNS = 100
-// band 上的每一段各自一個框，比較好分辨區塊（10/8 試過框、底色、膠囊，當時使用者都不要；10/13 改成每段各一個框）。
-// 不上底色。框線一格加內距一格才寫字，跟其他框的文字起點對齊；放不下拿掉框時改用兩格內距，文字留在同一欄
-const BAND_FRAME = { borderStyle: 'round', borderColor: 'subtle', paddingX: 1 } as const
-const BAND_PADDING_X = 2
-// 有框時這一段佔的列數：框線上下各一列加這一列
-const FRAMED_ROWS = 3
-// 這一段的 key：clean-view 靠它找到這一段，合併框讓出它的列數，整排放不下時也由它拿掉這裡的框
-// （clean-view/hooks/register.tsx 的 GITLAB_BAND_KEY），改名要兩邊一起改
-const BAND_KEY = 'gitlab-band'
+// 各段之間空兩格、不加「·」，跟 Claude Code 的 statusline 一樣（10/13 使用者要求縮短間距）
+const SEGMENT_SEPARATOR = '  '
 // 背景跑的 git 不能停在密碼提示，連不上就直接失敗
 const GIT_ENV = { GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' }
 const EMPTY_INBOX: InboxStatus = { unreadCount: 0, problem: null, openCounts: null }
@@ -62,7 +55,7 @@ const repoSync = atom({ plugin: 'gitlab-sync', key: 'repo' } as const, null)
 const gitlabInbox = atom({ plugin: 'gitlab-sync', key: 'inbox' } as const, EMPTY_INBOX)
 const githubInbox = atom({ plugin: 'gitlab-sync', key: 'githubInbox' } as const, EMPTY_INBOX)
 
-// 平台的名稱：label 寫在 band、toast 與報告裡，command 是斜線指令
+// 平台的名稱：label 寫在底部那一列、toast 與報告裡，command 是斜線指令
 export type ForgeNames = { label: string; command: string }
 
 type Forge = ForgeNames & {
@@ -70,7 +63,7 @@ type Forge = ForgeNames & {
   // $.store 的鍵；$.store 跨 session 共用：每個 session 都會輪詢，但同一個事件只記一次，未讀清單大家看同一份
   storeKeys: { since: string; seenIds: string; unread: string }
   // 這個 repo 在這個平台上的專案路徑；null 代表 remote 不在這個平台：
-  // 未讀動態與還開著的項目不分專案全部列，band 不顯示張數；remote 在另一個平台時，band 也不顯示這個平台的新動態與通知暫停
+  // 未讀動態與還開著的項目不分專案全部列，底部那一列不顯示張數；remote 在另一個平台時，底部那一列也不顯示這個平台的新動態與通知暫停
   projectOf: (repo: RepoSync | null) => string | null
   // 還開著的項目分哪幾種類型計數；這些類型 0 張也顯示，其他類型有才顯示
   issueKinds: readonly string[]
@@ -246,10 +239,10 @@ function notifyNewRemoteCommits($: EngineInterface, key: string, upstream: strin
 }
 
 async function setRepo($: EngineInterface, next: RepoSync | null) {
-  // 沒變就不寫：寫入會讓 band 重畫
+  // 沒變就不寫：寫入會讓底部那一列重畫
   if (JSON.stringify(await read($, repoSync)) === JSON.stringify(next)) return
   await update($, repoSync, () => next)
-  // 換了目錄或 remote，band 的數字要跟著換專案算，不等下一次輪詢
+  // 換了目錄或 remote，底部那一列的數字要跟著換專案算，不等下一次輪詢
   await Promise.all(FORGES.map(forge => syncCounts($, forge)))
 }
 
@@ -339,7 +332,7 @@ function withTimeout<T>($: EngineInterface, work: Promise<T>, ms: number): Promi
   })
 }
 
-// 通知暫停時張數也跟著清掉，band 只顯示暫停，不留一個不知道多舊的數字
+// 通知暫停時張數也跟著清掉，底部那一列只顯示暫停，不留一個不知道多舊的數字
 async function stopPolling($: EngineInterface, forge: Forge, problem: string) {
   await setProblem($, forge, problem)
   await setOpenIssues($, forge, null)
@@ -350,7 +343,7 @@ async function setOpenIssues($: EngineInterface, forge: Forge, next: OpenIssuesR
   await syncCounts($, forge)
 }
 
-// band 的數字（新動態則數、各類型的張數）跟斜線指令的清單用同一個 repo 過濾；
+// 底部那一列的數字（新動態則數、各類型的張數）跟斜線指令的清單用同一個 repo 過濾；
 // 未讀清單、還開著的項目或目前的 repo 任一個變了都要重算
 async function syncCounts($: EngineInterface, forge: Forge) {
   const project = forge.projectOf(await read($, repoSync))
@@ -476,7 +469,7 @@ export function repoReport(repo: RepoSync | null): string {
 
 // ── 畫面 ──────────────────────────────────────────────
 
-export function bandSegments(repo: RepoSync | null, gitlabStatus: InboxStatus, githubStatus: InboxStatus = EMPTY_INBOX): Segment[] {
+export function footerSegments(repo: RepoSync | null, gitlabStatus: InboxStatus, githubStatus: InboxStatus = EMPTY_INBOX): Segment[] {
   const segments: Segment[] = []
   if (repo !== null) {
     segments.push(remoteSegment(repo))
@@ -605,39 +598,29 @@ export const register: Register = (on, options) => {
     return completed
   })
 
-  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const rest = await next(e) // 其他 mod 與 Claude Code 畫在這裡的內容照樣保留
-    if (e.props.hasSurvey) return rest
-    const segments = bandSegments(await read($, repoSync), await read($, gitlabInbox), await read($, githubInbox))
-    if (segments.length === 0) return rest
+  // 10/13 從輸入框上方的 band 搬到這裡：mod 能畫在輸入框下方的只有提示列（PromptHint，「auto mode on」那一行）。
+  // Claude Code 原本那一行保留在上面（模式提示照樣即時更新），這一列接在下面；子代理清單是 Claude Code 自己畫的，
+  // 沒有開放給 mod，所以這一列在清單上面，放不到清單底下。不加框，跟上面的 statusline、提示列同一欄起頭
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    const hint = await next(e)
+    const segments = footerSegments(await read($, repoSync), await read($, gitlabInbox), await read($, githubInbox))
+    if (segments.length === 0) return hint
     const { Box, Text } = $.ui.resolve(e)
-    const line = (
-      <Text wrap="truncate-end">
-        {segments.flatMap((segment, index) =>
-          (segment.spans ?? [segment]).map((span, spanIndex) => (
-            // 分隔符號跟著該段第一個片段的樣式
-            <Text key={`segment-${index}-${spanIndex}`} color={span.color} dimColor={span.isDim} bold={span.isBold}>
-              {`${index > 0 && spanIndex === 0 ? '  ·  ' : ''}${span.text}`}
-            </Text>
-          )),
-        )}
-      </Text>
-    )
-    // 排在 band 最下面，緊貼輸入框：其他 mod 與 Claude Code 的內容都在上面
     return (
       <Box flexDirection="column">
-        {rest}
-        <Box key={BAND_KEY} {...bandFrame(e.props.maxRows)}>
-          {line}
-        </Box>
+        {hint}
+        <Text wrap="truncate-end">
+          {segments.flatMap((segment, index) =>
+            (segment.spans ?? [segment]).map((span, spanIndex) => (
+              <Text key={`segment-${index}-${spanIndex}`} color={span.color} dimColor={span.isDim} bold={span.isBold}>
+                {`${index > 0 && spanIndex === 0 ? SEGMENT_SEPARATOR : ''}${span.text}`}
+              </Text>
+            )),
+          )}
+        </Text>
       </Box>
     )
   })
-}
-
-// 這個 mod 只看得到自己這一段：放得下就加框。上面還有 clean-view 的合併框時，整排放不放得下由 clean-view 判斷，放不下會一起拿掉這裡的框
-export function bandFrame(maxRows: number): { paddingX: number; borderStyle?: string; borderColor?: string } {
-  return FRAMED_ROWS <= maxRows ? { ...BAND_FRAME } : { paddingX: BAND_PADDING_X }
 }
 
 async function refreshAfterTurn($: EngineInterface) {

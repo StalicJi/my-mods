@@ -22,7 +22,7 @@ export type ForgeEvent = {
 // GitHub 的 login 也放在 username
 export type ForgeUser = { id: number; username: string }
 
-// 「還開著的 issue」：跟動態通知分開查，不受 since 起點影響；band 顯示張數，指令列出清單。
+// 「還開著的 issue」：跟動態通知分開查，不受 since 起點影響；底部那一列顯示張數，指令列出清單。
 // 查詢不分專案，顯示時才依目前 repo 過濾，換目錄不必重查
 export type OpenIssue = {
   id: number

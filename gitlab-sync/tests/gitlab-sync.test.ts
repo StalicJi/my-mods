@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { gitlabProjectOf, noteEvents, stateEvents, toItem, toNote, toOpenIssue, workItemKind } from '../hooks/gitlab'
 import type { GitlabItem, GitlabNote } from '../hooks/gitlab'
-import { bandFrame, bandSegments, remoteSegment, repoReport, startupToastText, toastText } from '../hooks/register'
+import { footerSegments, remoteSegment, repoReport, startupToastText, toastText } from '../hooks/register'
 import { clipColumns, describeEvent, excerptOf, formatAgo, groupByKind, inProject, openIssueLines, remoteHostOf } from '../hooks/shared'
 import type { ForgeEvent } from '../hooks/shared'
 import type { InboxStatus, KindCount, RepoSync } from '../types'
@@ -20,7 +20,7 @@ const counts = (task: number, issue: number): KindCount[] => [
   { kind: 'Issue', count: issue },
 ]
 const SYNCED: RepoSync = { branch: 'develop', isDetached: false, upstream: 'origin/develop', ahead: 0, behind: 0, dirtyCount: 0, isFetchFailed: false, remoteHost: 'gitlab.example.com', gitlabProject: 'acme/team/handbook', githubRepo: null }
-const BAND_PROPS = { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 160 }
+const HINT_PROPS = { isDraft: false, isWorking: false, hint: '? for shortcuts' }
 const GITLAB_NAMES = { label: 'GitLab', command: 'gitlab' }
 
 const ISSUE_RAW = {
@@ -164,12 +164,12 @@ describe('文字與畫面', () => {
     expect(startupToastText([site, monitor], null, GITLAB_NAMES)).toBe('GitLab 有 2 則未讀動態（/gitlab 查看）')
   })
 
-  test('band 各種同步狀態的文字與顏色', () => {
-    const texts = (repo: RepoSync | null, inbox = NO_INBOX) => bandSegments(repo, inbox).map(segment => segment.text)
+  test('底部那一列各種同步狀態的文字與顏色', () => {
+    const texts = (repo: RepoSync | null, inbox = NO_INBOX) => footerSegments(repo, inbox).map(segment => segment.text)
     expect(texts(SYNCED)).toEqual(['GitLab', '⎇ develop', '✓ 已同步'])
     expect(texts({ ...SYNCED, ahead: 1, dirtyCount: 3 })).toEqual(['GitLab', '⎇ develop', '↑1 待 push', '3 個檔案未提交'])
     expect(texts({ ...SYNCED, behind: 2, isFetchFailed: true })).toEqual(['GitLab', '⎇ develop', '↓2 待 pull（fetch 失敗，依快取）'])
-    expect(bandSegments({ ...SYNCED, ahead: 1, behind: 2 }, NO_INBOX)[2]).toMatchObject({ text: '↑1 ↓2 分岔', color: 'error' })
+    expect(footerSegments({ ...SYNCED, ahead: 1, behind: 2 }, NO_INBOX)[2]).toMatchObject({ text: '↑1 ↓2 分岔', color: 'error' })
     expect(texts({ ...SYNCED, upstream: null })).toEqual(['GitLab', '⎇ develop', '沒有遠端分支（還沒 push？）'])
     expect(texts({ ...SYNCED, branch: 'a1b2c3d', isDetached: true, upstream: null })).toEqual(['GitLab', '⎇ a1b2c3d（detached）'])
     expect(texts(null, { ...NO_INBOX, unreadCount: 2 })).toEqual(['GitLab 2 則新動態（/gitlab）'])
@@ -177,8 +177,8 @@ describe('文字與畫面', () => {
     expect(texts(null)).toEqual([])
   })
 
-  test('band 的還開著的張數：Task、Issue 分開算，排在最後，0 張也顯示，還沒查到時不顯示；指令提示只接在最後一段；數字 0 張綠色、有張數紅色', () => {
-    const texts = (repo: RepoSync | null, inbox: InboxStatus) => bandSegments(repo, inbox).map(segment => segment.text)
+  test('底部那一列的還開著的張數：Task、Issue 分開算，排在最後，0 張也顯示，還沒查到時不顯示；指令提示只接在最後一段；數字 0 張綠色、有張數紅色', () => {
+    const texts = (repo: RepoSync | null, inbox: InboxStatus) => footerSegments(repo, inbox).map(segment => segment.text)
     expect(texts(SYNCED, { ...NO_INBOX, openCounts: counts(2, 1) })).toEqual(['GitLab', '⎇ develop', '✓ 已同步', 'Task 2 張', 'Issue 1 張（/gitlab）'])
     expect(texts({ ...SYNCED, dirtyCount: 2 }, { ...NO_INBOX, unreadCount: 3, openCounts: counts(0, 4) })).toEqual([
       'GitLab',
@@ -193,7 +193,7 @@ describe('文字與畫面', () => {
     expect(texts(SYNCED, NO_INBOX)).toEqual(['GitLab', '⎇ develop', '✓ 已同步'])
     // 其他類型有才會出現在計數裡，接在後面，提示跟著移到最後一段
     expect(texts(SYNCED, { ...NO_INBOX, openCounts: [...counts(1, 0), { kind: 'Incident', count: 1 }] }).slice(3)).toEqual(['Task 1 張', 'Issue 0 張', 'Incident 1 張（/gitlab）'])
-    const segments = bandSegments(SYNCED, { ...NO_INBOX, openCounts: counts(3, 0) })
+    const segments = footerSegments(SYNCED, { ...NO_INBOX, openCounts: counts(3, 0) })
     expect(segments.at(-2)?.spans).toEqual([
       { text: 'Task ', isDim: true },
       { text: '3', color: 'error', isBold: true },
@@ -209,8 +209,8 @@ describe('文字與畫面', () => {
     expect(texts(SYNCED, legacy)).toEqual(['GitLab', '⎇ develop', '✓ 已同步'])
   })
 
-  test('band 最前面標示來源：設定的 GitLab、GitHub、本機或主機名稱；不在設定的 GitLab 專案時不顯示張數；GitHub repo 裡不顯示 GitLab 的新動態與通知暫停，本機與其他主機照常', () => {
-    const texts = (repo: RepoSync | null, inbox: InboxStatus) => bandSegments(repo, inbox).map(segment => segment.text)
+  test('底部那一列最前面標示來源：設定的 GitLab、GitHub、本機或主機名稱；不在設定的 GitLab 專案時不顯示張數；GitHub repo 裡不顯示 GitLab 的新動態與通知暫停，本機與其他主機照常', () => {
+    const texts = (repo: RepoSync | null, inbox: InboxStatus) => footerSegments(repo, inbox).map(segment => segment.text)
     const github: RepoSync = { ...SYNCED, remoteHost: 'github.com', gitlabProject: null, githubRepo: 'alice/notes-app' }
     const local: RepoSync = { ...SYNCED, upstream: null, remoteHost: null, gitlabProject: null }
     const bitbucket: RepoSync = { ...SYNCED, remoteHost: 'bitbucket.org', gitlabProject: null }
@@ -230,7 +230,7 @@ describe('文字與畫面', () => {
 
   test('來源標示的顏色：GitLab Claude 橘、GitHub 主題文字色（深色主題是白色）、本機與其他主機暗色', () => {
     const style = (repo: RepoSync) => {
-      const { text, color, isDim } = bandSegments(repo, NO_INBOX)[0] ?? {}
+      const { text, color, isDim } = footerSegments(repo, NO_INBOX)[0] ?? {}
       return { text, color, isDim }
     }
     expect(style(SYNCED)).toEqual({ text: 'GitLab', color: 'claude', isDim: undefined })
@@ -396,8 +396,8 @@ async function start($: any, on: any) {
 
 const runGitlab = async ($: any): Promise<string> => (await $.command.run({ command: 'gitlab', args: '' } as any)).text
 
-async function bandText($: any, surface: 'terminal' | 'desktop' = 'terminal'): Promise<string> {
-  const ui = await $.ui.mount({ plugin: 'gitlab-sync', surface, component: 'AbovePrompt', props: BAND_PROPS } as any)
+async function footerText($: any, surface: 'terminal' | 'desktop' = 'terminal'): Promise<string> {
+  const ui = await $.ui.mount({ plugin: 'gitlab-sync', surface, component: 'PromptHint', props: HINT_PROPS } as any)
   const texts: string[] = []
   const walk = (node: any) => {
     if (typeof node === 'string') texts.push(node)
@@ -409,7 +409,7 @@ async function bandText($: any, surface: 'terminal' | 'desktop' = 'terminal'): P
 }
 
 describe('整合情境', () => {
-  test('第一次只記下起點；之後別人留言會跳 toast、band 顯示未讀，/gitlab 列出後標為已讀', OPTIONS, async ($, on) => {
+  test('第一次只記下起點；之後別人留言會跳 toast、底部那一列顯示未讀，/gitlab 列出後標為已讀', OPTIONS, async ($, on) => {
     const clock = mock.clock(on, { now: T0 })
     mock.store(on)
     const toasts = captureToasts(on)
@@ -435,13 +435,13 @@ describe('整合情境', () => {
     notes = [{ id: 9551, system: false, body: '謝謝回報，查清楚了。', created_at: iso(T0 + 60_000), author: BOB }]
     await clock.advance(3 * 60_000) // 背景每分鐘一輪，GitLab 每兩分鐘輪詢一次
     expect(toasts).toContain('GitLab：bob 在 web-app#5 留言：謝謝回報，查清楚了。')
-    for (const surface of ['terminal', 'desktop'] as const) expect(await bandText($, surface)).toContain('GitLab 1 則新動態（/gitlab）')
+    for (const surface of ['terminal', 'desktop'] as const) expect(await footerText($, surface)).toContain('GitLab 1 則新動態（/gitlab）')
 
     const report = await runGitlab($)
     expect(report).toContain('GitLab 新動態 1 則（已標為已讀）：')
     expect(report).toContain('bob 在 web-app#5 留言：謝謝回報，查清楚了。')
     expect(report).toContain(`${ISSUE_RAW.web_url}#note_9551`)
-    expect(await bandText($)).not.toContain('則新動態')
+    expect(await footerText($)).not.toContain('則新動態')
     expect(await runGitlab($)).toContain('GitLab 新動態 0 則。')
 
     expect(requests.length).toBeGreaterThan(0)
@@ -535,13 +535,13 @@ describe('整合情境', () => {
     for (const scope of ['created_by_me', 'assigned_to_me']) {
       expect(requests.some(request => request.url.includes(`/issues?scope=${scope}&state=opened&`))).toBe(true)
     }
-    // 沒有 remote 的 repo：band 標「本機」，不顯示全部專案加總的張數
-    const band = await bandText($)
-    expect(band).toContain('本機  ·  ⎇ main  ·  ✓ 已同步')
-    expect(band).not.toContain(' 張（/gitlab）')
+    // 沒有 remote 的 repo：底部那一列標「本機」，不顯示全部專案加總的張數
+    const footer = await footerText($)
+    expect(footer).toContain('本機  ⎇ main  ✓ 已同步')
+    expect(footer).not.toContain(' 張（/gitlab）')
   })
 
-  test('在 GitLab 專案的 repo 裡只列這個專案的 issue，band 張數也只算這個專案；換 repo 時回合結束就跟著換', OPTIONS, async ($, on) => {
+  test('在 GitLab 專案的 repo 裡只列這個專案的 issue，底部那一列張數也只算這個專案；換 repo 時回合結束就跟著換', OPTIONS, async ($, on) => {
     const clock = mock.clock(on, { now: T0 })
     mock.store(on)
     on('env.get', () => ({ value: 'test-token' }))
@@ -568,25 +568,25 @@ describe('整合情境', () => {
     const report = await runGitlab($)
     expect(report).toContain('這個 repo（web-app）裡你開的或指派給你、還開著的 Issue 1 張：\n• web-app#5')
     expect(report).not.toContain('api-server')
-    expect(await bandText($)).toContain('Task 0 張  ·  Issue 1 張（/gitlab）')
+    expect(await footerText($)).toContain('Task 0 張  Issue 1 張（/gitlab）')
 
     // 換到一張都沒有的專案：回合結束只讀本機就重算，不必等下一次輪詢
     repo = { ...siteRepo, root: '/work-l', remotes: { gitlab: `${GITLAB_URL}/acme/team/handbook.git` } }
     await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1 } as any)
     await clock.advance(0)
-    expect(await bandText($)).toContain('Task 0 張  ·  Issue 0 張（/gitlab）')
+    expect(await footerText($)).toContain('Task 0 張  Issue 0 張（/gitlab）')
     expect(await runGitlab($)).toContain('這個 repo（handbook）裡你開的或指派給你、還開著的 Task 0 張。\n這個 repo（handbook）裡你開的或指派給你、還開著的 Issue 0 張。')
 
-    // remote 在 GitHub：/gitlab 不分專案全部列；band 標 GitHub、不顯示張數
+    // remote 在 GitHub：/gitlab 不分專案全部列；底部那一列標 GitHub、不顯示張數
     repo = { ...siteRepo, root: '/work-m', remotes: { gitlab: 'git@github.com:someone/repo.git' } }
     const all = await runGitlab($)
     expect(all).toContain('\n你開的或指派給你、還開著的 Issue 2 張：')
-    const githubBand = await bandText($)
-    expect(githubBand).toContain('GitHub  ·  ⎇ main')
-    expect(githubBand).not.toContain(' 張（/gitlab）')
+    const githubFooter = await footerText($)
+    expect(githubFooter).toContain('GitHub  ⎇ main')
+    expect(githubFooter).not.toContain(' 張（/gitlab）')
   })
 
-  test('在 GitLab 專案的 repo 裡未讀動態只列、只標已讀這個專案的，band 則數也只算這個專案；別的專案照跳 toast 並寫明去哪看', OPTIONS, async ($, on) => {
+  test('在 GitLab 專案的 repo 裡未讀動態只列、只標已讀這個專案的，底部那一列則數也只算這個專案；別的專案照跳 toast 並寫明去哪看', OPTIONS, async ($, on) => {
     const clock = mock.clock(on, { now: T0 })
     // 舊版存下、沒有 projectPath 的未讀動態：不知道是哪個專案，每個 repo 都列得到
     const legacy = { id: 'note-1', kind: 'comment', actor: 'bob', ref: 'old#1', title: '舊', excerpt: '舊留言', url: 'u-legacy', at: iso(T0 - 60_000) }
@@ -621,30 +621,30 @@ describe('整合情境', () => {
     await clock.advance(0)
     expect(toasts).toContain('GitLab 有 1 則未讀動態（/gitlab 查看）')
 
-    // 別的專案有人留言：照跳 toast，寫明要到哪個 repo 看；這裡的 band 則數不變
+    // 別的專案有人留言：照跳 toast，寫明要到哪個 repo 看；這裡的底部那一列則數不變
     siteNotes = [{ id: 9551, system: false, body: '謝謝回報', created_at: iso(T0 + 60_000), author: BOB }]
     await clock.advance(2 * 60_000)
     expect(toasts).toContain('GitLab：bob 在 web-app#5 留言：謝謝回報（到 web-app 用 /gitlab 查看）')
-    expect(await bandText($)).toContain('GitLab 1 則新動態（/gitlab）')
+    expect(await footerText($)).toContain('GitLab 1 則新動態（/gitlab）')
 
     mrNotes = [{ id: 9601, system: false, body: '看起來可以', created_at: iso(T0 + 180_000), author: BOB }]
     await clock.advance(2 * 60_000)
     expect(toasts).toContain('GitLab：bob 在 api-server!3 留言：看起來可以')
-    expect(await bandText($)).toContain('GitLab 2 則新動態（/gitlab）')
+    expect(await footerText($)).toContain('GitLab 2 則新動態（/gitlab）')
 
     const report = await runGitlab($)
     expect(report).toContain('這個 repo（api-server）裡 GitLab 新動態 2 則（已標為已讀）：')
     expect(report).toContain('bob 在 api-server!3 留言：看起來可以')
     expect(report).toContain('bob 在 old#1 留言：舊留言')
     expect(report).not.toContain('web-app#5')
-    expect(await bandText($)).not.toContain('則新動態')
+    expect(await footerText($)).not.toContain('則新動態')
     expect(await runGitlab($)).toContain('這個 repo（api-server）裡 GitLab 新動態 0 則。')
 
-    // 別的專案的那則還沒讀：換到那個 repo，回合結束就算進 band，/gitlab 列得到
+    // 別的專案的那則還沒讀：換到那個 repo，回合結束就算進底部那一列，/gitlab 列得到
     repo = { ...deviceRepo, root: '/work-o', remotes: { origin: `${GITLAB_URL}/acme/web/web-app.git` } }
     await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1 } as any)
     await clock.advance(0)
-    expect(await bandText($)).toContain('GitLab 1 則新動態（/gitlab）')
+    expect(await footerText($)).toContain('GitLab 1 則新動態（/gitlab）')
     const siteReport = await runGitlab($)
     expect(siteReport).toContain('這個 repo（web-app）裡 GitLab 新動態 1 則（已標為已讀）：')
     expect(siteReport).toContain('bob 在 web-app#5 留言：謝謝回報')
@@ -666,10 +666,10 @@ describe('整合情境', () => {
     await start($, on)
     await clock.advance(0)
     expect(toasts).toContain('GitLab 有 1 則未讀動態（/gitlab 查看），其他專案還有 1 則（web-app）')
-    expect(await bandText($)).toContain('GitLab 1 則新動態（/gitlab）')
+    expect(await footerText($)).toContain('GitLab 1 則新動態（/gitlab）')
   })
 
-  test('band 這一段有圓角框、不上底色，框線加內距共兩格，文字跟其他框的內文對齊', OPTIONS, async ($, on) => {
+  test('底部那一列接在 Claude Code 的提示列下面：原本那一行保留在上面，這一列不加框、不上底色', OPTIONS, async ($, on) => {
     mock.clock(on, { now: T0 })
     mock.store(on)
     on('env.get', () => ({ value: 'test-token' }))
@@ -678,38 +678,31 @@ describe('整合情境', () => {
 
     await start($, on)
     for (const surface of ['terminal', 'desktop'] as const) {
-      const ui = await $.ui.mount({ plugin: 'gitlab-sync', surface, component: 'AbovePrompt', props: BAND_PROPS } as any)
-      const band = await ui.find({ type: 'Box', key: 'gitlab-band' })
-      expect(band?.props).toMatchObject({ borderStyle: 'round', borderColor: 'subtle', paddingX: 1 })
-      expect(band?.props.paddingY).toBeUndefined()
-      expect((await ui.findAll({ type: 'Box' })).some(box => box.props.backgroundColor !== undefined)).toBe(false)
-      expect(await ui.find({ type: 'Text', text: /⎇ main/ })).toBeDefined()
+      const ui = await $.ui.mount({ plugin: 'gitlab-sync', surface, component: 'PromptHint', props: HINT_PROPS } as any)
+      const drawn = JSON.stringify(await ui.drawn())
+      expect(drawn.indexOf('engine draws')).toBeGreaterThanOrEqual(0)
+      expect(drawn.indexOf('engine draws')).toBeLessThan(drawn.indexOf('⎇ main'))
+      const boxes = await ui.findAll({ type: 'Box' })
+      expect(boxes.some(box => box.props.borderStyle !== undefined || box.props.backgroundColor !== undefined)).toBe(false)
       await ui.unmount()
     }
   })
 
-  test('這一列排在 band 最下面、緊貼輸入框：其他 mod 與 Claude Code 畫的內容都在它上面', OPTIONS, async ($, on) => {
+  test('沒有東西要顯示（不在 repo、沒有新動態也沒暫停）時提示列照 Claude Code 原樣，不多一列', OPTIONS, async ($, on) => {
     mock.clock(on, { now: T0 })
     mock.store(on)
     on('env.get', () => ({ value: 'test-token' }))
-    fakeCommands(on, () => ({ root: '/work-q', branch: 'main', upstream: 'origin/main', counts: '0\t0', status: '' }))
+    // 不在 git repo：git 指令全部失敗，鑰匙圈也是空的
+    on('process.run', () => processResult(128, ''))
     fakeGitlab(on, path => (path === '/user' ? ME : []))
 
     await start($, on)
-    const ui = await $.ui.mount({ plugin: 'gitlab-sync', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS } as any)
-    const drawn: any = await ui.drawn()
-    const last = drawn.children[drawn.children.length - 1]
-    expect(last.props).toMatchObject({ key: 'gitlab-band' })
-    expect(JSON.stringify(drawn).indexOf('engine draws')).toBeLessThan(JSON.stringify(drawn).indexOf('⎇ main'))
+    const ui = await $.ui.mount({ plugin: 'gitlab-sync', surface: 'terminal', component: 'PromptHint', props: HINT_PROPS } as any)
+    expect(await ui.findAll({ type: 'Text', text: /GitLab|⎇/ })).toEqual([])
     await ui.unmount()
   })
 
-  test('放得下自己這一段（框線上下各一列加這一列）才加框；拿掉框時改用兩格內距，文字留在同一欄', () => {
-    expect(bandFrame(3)).toEqual({ borderStyle: 'round', borderColor: 'subtle', paddingX: 1 })
-    expect(bandFrame(2)).toEqual({ paddingX: 2 })
-  })
-
-  test('band 的還開著的 issue 張數：背景輪詢會更新，查不到或通知暫停時不留舊數字', OPTIONS, async ($, on) => {
+  test('底部那一列的還開著的 issue 張數：背景輪詢會更新，查不到或通知暫停時不留舊數字', OPTIONS, async ($, on) => {
     const clock = mock.clock(on, { now: T0 })
     mock.store(on)
     let token: string | undefined = 'test-token'
@@ -727,26 +720,26 @@ describe('整合情境', () => {
 
     await start($, on)
     await clock.advance(0)
-    expect(await bandText($)).toContain('⎇ main  ·  ✓ 已同步  ·  Task 0 張  ·  Issue 2 張（/gitlab）')
+    expect(await footerText($)).toContain('⎇ main  ✓ 已同步  Task 0 張  Issue 2 張（/gitlab）')
 
     // 背景每兩分鐘輪詢一次，關掉一張就少一張
     createdByMe = [ISSUE_RAW]
     await clock.advance(2 * 60_000)
-    expect(await bandText($)).toContain('Issue 1 張（/gitlab）')
+    expect(await footerText($)).toContain('Issue 1 張（/gitlab）')
 
     // 只有這一段查不到：不顯示張數，也不算通知暫停
     isOpenQueryBroken = true
     await clock.advance(2 * 60_000)
-    expect(await bandText($)).not.toContain('Issue ')
-    expect(await bandText($)).not.toContain('通知暫停')
+    expect(await footerText($)).not.toContain('Issue ')
+    expect(await footerText($)).not.toContain('通知暫停')
 
     isOpenQueryBroken = false
     await clock.advance(2 * 60_000)
-    expect(await bandText($)).toContain('Issue 1 張（/gitlab）')
+    expect(await footerText($)).toContain('Issue 1 張（/gitlab）')
 
     token = undefined
     await clock.advance(2 * 60_000)
-    const paused = await bandText($)
+    const paused = await footerText($)
     expect(paused).toContain('GitLab 通知暫停（/gitlab 看原因）')
     expect(paused).not.toContain('Issue ')
   })
@@ -766,7 +759,7 @@ describe('整合情境', () => {
     expect(report).toContain('讀不到還開著的 Task／Issue：GitLab 回應 HTTP 404（/issues）')
   })
 
-  test('沒有 GITLAB_TOKEN、鑰匙圈也讀不到時通知暫停，band 與 /gitlab 都說明原因，git 部分照常', OPTIONS, async ($, on) => {
+  test('沒有 GITLAB_TOKEN、鑰匙圈也讀不到時通知暫停，底部那一列與 /gitlab 都說明原因，git 部分照常', OPTIONS, async ($, on) => {
     mock.clock(on, { now: T0 })
     mock.store(on)
     const toasts = captureToasts(on)
@@ -780,7 +773,7 @@ describe('整合情境', () => {
     expect(report).toContain('GitLab 通知暫停：GITLAB_TOKEN 是空的，鑰匙圈也讀不到 gitlab-token')
     expect(report).not.toContain('還開著的')
     expect(toasts.filter(text => text.startsWith('GitLab 通知暫停'))).toHaveLength(1)
-    expect(await bandText($)).toContain('GitLab 通知暫停（/gitlab 看原因）')
+    expect(await footerText($)).toContain('GitLab 通知暫停（/gitlab 看原因）')
   })
 
   test('環境變數的 token 被拒絕（401）時改用鑰匙圈的最新 token，之後沿用、不再每輪讀鑰匙圈', OPTIONS, async ($, on) => {
@@ -847,11 +840,11 @@ describe('整合情境', () => {
     keychain.token = 'revoked-token'
     await clock.advance(2 * 60_000)
     expect(requests.some(request => request.token === 'revoked-token')).toBe(true)
-    expect(await bandText($)).toContain('GitLab 通知暫停（/gitlab 看原因）')
+    expect(await footerText($)).toContain('GitLab 通知暫停（/gitlab 看原因）')
 
     keychain.token = 'fresh-token'
     await clock.advance(2 * 60_000)
-    expect(await bandText($)).not.toContain('通知暫停')
+    expect(await footerText($)).not.toContain('通知暫停')
   })
 
   test('遠端多了新 commit 時提醒一次；回合結束就更新未提交的檔案數', OPTIONS, async ($, on) => {
@@ -867,18 +860,18 @@ describe('整合情境', () => {
 
     await start($, on)
     await clock.advance(0)
-    expect(await bandText($)).toContain('⎇ develop  ·  ✓ 已同步  ·  2 個檔案未提交')
+    expect(await footerText($)).toContain('⎇ develop  ✓ 已同步  2 個檔案未提交')
     expect(toasts.some(text => text.includes('新 commit'))).toBe(false)
 
     behind = 2
     await clock.advance(5 * 60_000)
     expect(toasts.filter(text => text === 'origin/develop 多了 2 個新 commit，本機落後 2 個')).toHaveLength(1)
-    expect(await bandText($)).toContain('↓2 待 pull')
+    expect(await footerText($)).toContain('↓2 待 pull')
 
     status = ''
     await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1 } as any)
     await clock.advance(0)
-    expect(await bandText($)).not.toContain('未提交')
+    expect(await footerText($)).not.toContain('未提交')
   })
 
   test('這台電腦沒設定 GitLab 網址：GitLab 部分整個不顯示、不讀 token、不連線，/gitlab 說明怎麼設定', async ($, on) => {
@@ -894,11 +887,11 @@ describe('整合情境', () => {
 
     await start($, on)
     await clock.advance(0)
-    const band = await bandText($)
+    const footer = await footerText($)
     // 認不出是 GitLab，來源直接寫主機名稱；沒有通知暫停也沒有 Issue 張數
-    expect(band).toContain('gitlab.example.com  ·  ⎇ main  ·  ✓ 已同步')
-    expect(band).not.toContain('GitLab')
-    expect(band).not.toContain('Issue ')
+    expect(footer).toContain('gitlab.example.com  ⎇ main  ✓ 已同步')
+    expect(footer).not.toContain('GitLab')
+    expect(footer).not.toContain('Issue ')
     expect(toasts.some(text => text.startsWith('GitLab'))).toBe(false)
     expect(await runGitlab($)).toContain('GitLab：這台電腦還沒設定 GitLab 網址，不檢查 GitLab（用 /plugin configure gitlab-sync 設定 gitlabUrl）。')
     expect(requests).toEqual([])

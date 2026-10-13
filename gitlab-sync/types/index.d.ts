@@ -10,13 +10,13 @@ export type RepoSync = {
   dirtyCount: number
   // 最近一次 fetch 失敗，ahead／behind 是用本機快取比對的
   isFetchFailed: boolean
-  // remote 的主機名稱（例如 gitlab.example.com、github.com），band 用來標示 GitLab／GitHub／本機；null 代表沒有 remote
+  // remote 的主機名稱（例如 gitlab.example.com、github.com），底部那一列用來標示 GitLab／GitHub／本機；null 代表沒有 remote
   remoteHost: string | null
   // 這個 repo 在設定的 GitLab 上的專案路徑（例如 acme/backend/api-server）；
-  // null 代表 remote 不在這台 GitLab：/gitlab 的未讀動態與還開著的 Task、Issue 不分專案全部列，band 不顯示張數
+  // null 代表 remote 不在這台 GitLab：/gitlab 的未讀動態與還開著的 Task、Issue 不分專案全部列，底部那一列不顯示張數
   gitlabProject: string | null
   // remote 在 github.com 時的 owner/repo（例如 alice/notes-app）；
-  // null 代表不在 GitHub：/github 的未讀動態與還開著的 issue 不分專案全部列，band 不顯示 GitHub 的 Issue 張數
+  // null 代表不在 GitHub：/github 的未讀動態與還開著的 issue 不分專案全部列，底部那一列不顯示 GitHub 的 Issue 張數
   githubRepo: string | null
 }
 

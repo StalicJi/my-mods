@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { githubRepoOf, linkUrl, timelineEvents, toItem, toOpenIssue, toTimelineEntries } from '../hooks/github'
 import type { GithubItem } from '../hooks/github'
-import { bandSegments } from '../hooks/register'
+import { footerSegments } from '../hooks/register'
 import type { InboxStatus, RepoSync } from '../types'
 
 const GITLAB_URL = 'http://gitlab.test'
@@ -14,7 +14,7 @@ const OCTO = { id: 583, login: 'octocat' }
 const ME_USER = { id: ME.id, username: ME.login }
 const REPO_URL = 'https://api.github.com/repos/alice/notes-app'
 const NO_INBOX: InboxStatus = { unreadCount: 0, problem: null, openCounts: null }
-const BAND_PROPS = { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 200 }
+const HINT_PROPS = { isDraft: false, isWorking: false, hint: '? for shortcuts' }
 
 const issueRaw = (number: number, title: string, user: typeof ME, assignees: (typeof ME)[] = [], extra: Record<string, unknown> = {}) => ({
   id: 9000 + number,
@@ -118,10 +118,10 @@ describe('判斷哪些 timeline 事件要通知', () => {
   })
 })
 
-describe('band', () => {
+describe('底部那一列', () => {
   const GITHUB_REPO: RepoSync = { branch: 'main', isDetached: false, upstream: 'origin/main', ahead: 0, behind: 0, dirtyCount: 0, isFetchFailed: false, remoteHost: 'github.com', gitlabProject: null, githubRepo: 'alice/notes-app' }
   const GITLAB_REPO: RepoSync = { ...GITHUB_REPO, remoteHost: 'gitlab.example.com', gitlabProject: 'acme/handbook', githubRepo: null }
-  const texts = (repo: RepoSync | null, gitlab: InboxStatus, github: InboxStatus) => bandSegments(repo, gitlab, github).map(segment => segment.text)
+  const texts = (repo: RepoSync | null, gitlab: InboxStatus, github: InboxStatus) => footerSegments(repo, gitlab, github).map(segment => segment.text)
 
   test('在 GitHub repo 裡只顯示 GitHub 的新動態、通知暫停與 Issue 張數；GitLab 的都不顯示', () => {
     expect(texts(GITHUB_REPO, { ...NO_INBOX, openCounts: [{ kind: 'Task', count: 4 }, { kind: 'Issue', count: 9 }] }, { unreadCount: 1, problem: null, openCounts: [{ kind: 'Issue', count: 2 }] })).toEqual([
@@ -132,7 +132,7 @@ describe('band', () => {
       'Issue 2 張（/github）',
     ])
     expect(texts(GITHUB_REPO, NO_INBOX, { ...NO_INBOX, problem: 'HTTP 401' })).toEqual(['GitHub', '⎇ main', '✓ 已同步', 'GitHub 通知暫停（/github 看原因）'])
-    // 截圖的情境：不在公司內網連不到 GitLab，GitHub repo 的 band 不該出現「GitLab 通知暫停」
+    // 截圖的情境：不在公司內網連不到 GitLab，GitHub repo 的底部那一列不該出現「GitLab 通知暫停」
     expect(texts(GITHUB_REPO, { ...NO_INBOX, problem: '連不上' }, { ...NO_INBOX, openCounts: [{ kind: 'Issue', count: 0 }] })).toEqual(['GitHub', '⎇ main', '✓ 已同步', 'Issue 0 張（/github）'])
     expect(texts(GITHUB_REPO, { ...NO_INBOX, unreadCount: 3 }, NO_INBOX)).toEqual(['GitHub', '⎇ main', '✓ 已同步'])
   })
@@ -224,8 +224,8 @@ async function start($: any, on: any) {
 
 const runGithub = async ($: any): Promise<string> => (await $.command.run({ command: 'github', args: '' } as any)).text
 
-async function bandText($: any, surface: 'terminal' | 'desktop' = 'terminal'): Promise<string> {
-  const ui = await $.ui.mount({ plugin: 'gitlab-sync', surface, component: 'AbovePrompt', props: BAND_PROPS } as any)
+async function footerText($: any, surface: 'terminal' | 'desktop' = 'terminal'): Promise<string> {
+  const ui = await $.ui.mount({ plugin: 'gitlab-sync', surface, component: 'PromptHint', props: HINT_PROPS } as any)
   const texts: string[] = []
   const walk = (node: any) => {
     if (typeof node === 'string') texts.push(node)
@@ -237,7 +237,7 @@ async function bandText($: any, surface: 'terminal' | 'desktop' = 'terminal'): P
 }
 
 describe('整合情境', () => {
-  test('別人回覆我的 issue：第一次只記起點，之後跳 toast、band 顯示新動態與 Issue 張數，/github 列出後標為已讀', OPTIONS, async ($, on) => {
+  test('別人回覆我的 issue：第一次只記起點，之後跳 toast、底部那一列顯示新動態與 Issue 張數，/github 列出後標為已讀', OPTIONS, async ($, on) => {
     const clock = mock.clock(on, { now: T0 })
     mock.store(on)
     const toasts = captureToasts(on)
@@ -262,19 +262,19 @@ describe('整合情境', () => {
 
     await start($, on)
     await clock.advance(0)
-    expect(await bandText($)).toContain('GitHub  ·  ⎇ main  ·  ✓ 已同步  ·  Issue 1 張（/github）')
+    expect(await footerText($)).toContain('GitHub  ⎇ main  ✓ 已同步  Issue 1 張（/github）')
 
     timeline = [commented(7001, OCTO, '我這邊也重現了', T0 + 60_000)]
     await clock.advance(3 * 60_000)
     expect(toasts).toContain('GitHub：octocat 在 notes-app#3 留言：我這邊也重現了')
-    for (const surface of ['terminal', 'desktop'] as const) expect(await bandText($, surface)).toContain('GitHub 1 則新動態（/github）')
+    for (const surface of ['terminal', 'desktop'] as const) expect(await footerText($, surface)).toContain('GitHub 1 則新動態（/github）')
 
     const report = await runGithub($)
     expect(report).toContain('這個 repo（notes-app）裡 GitHub 新動態 1 則（已標為已讀）：')
     expect(report).toContain('octocat 在 notes-app#3 留言：我這邊也重現了')
     expect(report).toContain('https://github.com/alice/notes-app/issues/3#issuecomment-7001')
     expect(report).toContain('這個 repo（notes-app）裡你開的或指派給你、還開著的 Issue 1 張：\n• notes-app#3  報表數字對不上\n  你開的，還沒指派')
-    expect(await bandText($)).not.toContain('則新動態')
+    expect(await footerText($)).not.toContain('則新動態')
     expect(await runGithub($)).toContain('這個 repo（notes-app）裡 GitHub 新動態 0 則。')
 
     // token 只走 Authorization header，網址裡沒有；只打 GitHub API
@@ -343,10 +343,10 @@ describe('整合情境', () => {
 
     await start($, on)
     await clock.advance(0)
-    const band = await bandText($)
-    expect(band).toContain('GitHub  ·  ⎇ main  ·  ✓ 已同步')
-    expect(band).not.toContain('GitHub 通知暫停')
-    expect(band).not.toContain('Issue ')
+    const footer = await footerText($)
+    expect(footer).toContain('GitHub  ⎇ main  ✓ 已同步')
+    expect(footer).not.toContain('GitHub 通知暫停')
+    expect(footer).not.toContain('Issue ')
     expect(toasts.some(text => text.startsWith('GitHub'))).toBe(false)
     expect(await runGithub($)).toContain('GitHub：這台電腦沒有登入 gh，不檢查 GitHub（在終端機執行 gh auth login 後，下一輪就會開始）。')
     expect(requests).toEqual([])
@@ -372,14 +372,14 @@ describe('整合情境', () => {
 
     await start($, on)
     await clock.advance(0)
-    expect(await bandText($)).toContain('GitHub 通知暫停（/github 看原因）')
+    expect(await footerText($)).toContain('GitHub 通知暫停（/github 看原因）')
     expect(toasts).toContain('GitHub 通知暫停：GitHub token 無效或已過期（HTTP 401），在終端機執行 gh auth login 重新登入')
 
     gh.token = 'fresh-token'
     await clock.advance(2 * 60_000)
-    const band = await bandText($)
-    expect(band).not.toContain('通知暫停')
-    expect(band).toContain('Issue 1 張（/github）')
+    const footer = await footerText($)
+    expect(footer).not.toContain('通知暫停')
+    expect(footer).toContain('Issue 1 張（/github）')
     // 被拒絕後下一輪才重新向 gh 要 token，不是每輪都要
     expect(gh.reads).toBe(2)
   })
