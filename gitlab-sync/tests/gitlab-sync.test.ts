@@ -310,8 +310,18 @@ describe('文字與畫面', () => {
 // ── 整合情境：模擬 engine、git 與 GitLab ─────────────────────
 
 // remotes：remote 名稱對網址；沒給時 git remote get-url 失敗，等於不在 GitLab 專案裡
-// fetch 給了就等它 resolve 才回應 git fetch，用來模擬連不上遠端、要等到逾時的 fetch
-type FakeRepo = { root: string; branch: string; upstream: string; counts: string; status: string; remotes?: Record<string, string>; fetch?: () => Promise<void> }
+// fetch 給了就等它 resolve 才回應 git fetch，用來模擬連不上遠端、要等到逾時的 fetch；resolve 的值是結束碼，沒給就是 0（成功）
+// fetchHead 是 FETCH_HEAD 的大小與修改時間，沒給就是沒有這個檔
+type FakeRepo = {
+  root: string
+  branch: string
+  upstream: string
+  counts: string
+  status: string
+  remotes?: Record<string, string>
+  fetch?: () => Promise<number | void>
+  fetchHead?: { size: number; mtimeMs: number }
+}
 // 鑰匙圈裡的 token 可以中途換掉；reads 記下每次 security 指令的 argv
 type FakeKeychain = { token: string | null; reads: string[][] }
 // route 回傳 UNAUTHORIZED 代表 GitLab 拒絕這個 token（HTTP 401）
@@ -328,7 +338,6 @@ function engine(on: any) {
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: '/work' }))
   on('command.register', () => ({ value: { command: 'gitlab' } }))
-  on('fs.stat', () => ({ deny: 'ENOENT' }))
   on('ui.render', ($: any, e: any) => {
     const { Text } = $.ui.resolve(e)
     return Text({ children: 'engine draws' })
@@ -351,7 +360,7 @@ function fakeCommands(on: any, repo: () => FakeRepo, keychain: FakeKeychain = { 
     if (args.includes('@{upstream}')) return ok(current.upstream)
     if (args.includes('--git-path')) return ok(`${current.root}/.git/FETCH_HEAD`)
     if (args[0] === 'symbolic-ref') return ok(current.branch)
-    if (args[0] === 'fetch') return current.fetch === undefined ? ok('') : current.fetch().then(() => ok(''))
+    if (args[0] === 'fetch') return Promise.resolve(current.fetch?.()).then(exitCode => processResult(exitCode ?? 0, ''))
     if (args[0] === 'rev-list') return ok(current.counts)
     if (args[0] === 'status') return ok(current.status)
     if (args[0] === 'remote' && args[1] === 'get-url') {
@@ -359,6 +368,11 @@ function fakeCommands(on: any, repo: () => FakeRepo, keychain: FakeKeychain = { 
       return remoteUrl === undefined ? processResult(2, '') : ok(remoteUrl)
     }
     return processResult(1, '')
+  })
+  // mod 只對 FETCH_HEAD 呼叫 fs.stat（看別的 session 或程式是不是剛 fetch 過）
+  on('fs.stat', () => {
+    const fetchHead = repo().fetchHead
+    return fetchHead === undefined ? { deny: 'ENOENT' } : { value: { kind: 'file', isLink: false, ...fetchHead } }
   })
 }
 
@@ -946,6 +960,49 @@ describe('整合情境', () => {
     await clock.advance(0)
     expect(await footerText()).toContain('↓2 待 pull')
     expect(toasts.some(text => text.includes('新 commit'))).toBe(false)
+  })
+
+  test('FETCH_HEAD 剛更新但是空的（別的程式的 fetch 失敗了或還在跑，例如 Fork 的自動 fetch）就照樣自己 fetch', OPTIONS, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    on('env.get', () => ({ value: 'test-token' }))
+    let fetchCount = 0
+    const fetch = async () => {
+      fetchCount += 1
+    }
+    // git fetch 一開始就把 FETCH_HEAD 清成空檔，10 秒前有別的程式開始 fetch
+    const fetchHead = { size: 0, mtimeMs: T0 - 10_000 }
+    fakeCommands(on, () => ({ root: '/work-h', branch: 'develop', upstream: 'origin/develop', counts: '0\t0', status: '', fetch, fetchHead }))
+    fakeGitlab(on, path => (path === '/user' ? ME : []))
+
+    await start($, on)
+    await clock.advance(0)
+    expect(fetchCount).toBe(1)
+  })
+
+  test('別人剛 fetch 成功（FETCH_HEAD 夠新而且有內容）就跳過，上次 fetch 失敗的標示也一起清掉', OPTIONS, async ($, on) => {
+    const clock = mock.clock(on, { now: T0 })
+    mock.store(on)
+    on('env.get', () => ({ value: 'test-token' }))
+    let fetchCount = 0
+    const failingFetch = async () => {
+      fetchCount += 1
+      return 128
+    }
+    let fetchHead: FakeRepo['fetchHead'] = undefined
+    fakeCommands(on, () => ({ root: '/work-s', branch: 'develop', upstream: 'origin/develop', counts: '0\t0', status: '', fetch: failingFetch, fetchHead }))
+    fakeGitlab(on, path => (path === '/user' ? ME : []))
+
+    await start($, on)
+    await clock.advance(0)
+    expect(await footerText()).toContain('fetch 失敗，依快取')
+
+    // 下一次該 fetch 的 10 秒前，別的 session 已經 fetch 成功
+    const nextFetchAt = T0 + 5 * 60_000
+    fetchHead = { size: 120, mtimeMs: nextFetchAt - 10_000 }
+    await clock.advance(5 * 60_000)
+    expect(fetchCount).toBe(1)
+    expect(await footerText()).not.toContain('fetch 失敗')
   })
 
   test('這台電腦沒設定 GitLab 網址：GitLab 部分整個不顯示、不讀 token、不連線，/gitlab 說明怎麼設定', async ($, on) => {

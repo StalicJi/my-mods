@@ -34,7 +34,7 @@ import {
 const TICK_MS = 60_000
 const FETCH_INTERVAL_MS = 5 * 60_000
 const POLL_INTERVAL_MS = 2 * 60_000
-// 同一個 repo 開了好幾個 session 時，FETCH_HEAD 夠新就代表別的 session 剛 fetch 過，這次不必再抓
+// 同一個 repo 開了好幾個 session 時，FETCH_HEAD 夠新（而且有內容，見 fetchUpstream）就代表別的 session 剛 fetch 過，這次不必再抓
 const FETCH_FRESH_MS = FETCH_INTERVAL_MS - 30_000
 // 輪詢範圍往前多抓一段，避免伺服器時間誤差漏掉動態；重複抓到的事件靠 id 去掉
 const POLL_OVERLAP_MS = 2 * 60_000
@@ -205,8 +205,8 @@ async function refreshRepo($: EngineInterface, how: RepoRefresh, now: number) {
 
   const upstream = isDetached ? null : await resolveUpstream($, root, branch)
   if (upstream !== null && how === 'fetch') {
-    const fetched = await fetchUpstream($, root, upstream, now)
-    if (fetched !== 'skipped') fetchFailedByRoot.set(root, fetched === 'failed')
+    // 跳過代表別人剛 fetch 成功，遠端的資料是新的，上次失敗的標示也跟著清掉
+    fetchFailedByRoot.set(root, (await fetchUpstream($, root, upstream, now)) === 'failed')
   }
   const [ahead, behind] = upstream === null ? [0, 0] : parseCounts(await git($, root, ['rev-list', '--left-right', '--count', `HEAD...${upstream}`]))
   const status = await git($, root, ['status', '--porcelain'])
@@ -239,7 +239,9 @@ async function fetchUpstream($: EngineInterface, root: string, upstream: string,
   const fetchHead = await git($, root, ['rev-parse', '--path-format=absolute', '--git-path', 'FETCH_HEAD'])
   if (fetchHead !== null) {
     const stat = await $.fs.stat(fetchHead).catch(() => null)
-    if (stat && now - stat.mtimeMs < FETCH_FRESH_MS) return 'skipped'
+    // git fetch 一開始就把 FETCH_HEAD 清成空檔，成功了才寫進內容；空檔代表別人的 fetch 失敗了或還在跑
+    // （例如 Fork 每 10 分鐘的自動 fetch，沒有帳號時會卡 4 分鐘才失敗），不能當成剛抓過
+    if (stat && stat.size > 0 && now - stat.mtimeMs < FETCH_FRESH_MS) return 'skipped'
   }
   // upstream 是「遠端名稱/遠端分支」，分支名稱本身可能含斜線（feat/x），只切第一個
   const slash = upstream.indexOf('/')
