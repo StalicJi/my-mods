@@ -70,7 +70,7 @@ const isEnabled = atom({ plugin: 'clean-view', key: 'isEnabled' } as const, true
 const plan = atom({ plugin: 'clean-view', key: 'plan' } as const, [] as PlanStep[])
 // 只有 band 讀它，所以動畫只會讓 band 重畫；用 $.ui.invalidate 會連 transcript 每一列都重跑
 const tick = atom({ plugin: 'clean-view', key: 'tick' } as const, 0)
-// 主迴圈回合的起訖時間：動畫計時器看它判斷回合是否進行中，標題列用它算經過秒數；
+// 一次工作的起訖時間（含背景子代理跑的時間，見 turn.start）：動畫計時器看它判斷工作是否進行中，標題列用它算經過秒數；
 // 畫面要不要顯示一律看 band 自己的 e.props.isWorking
 const turnClock = atom({ plugin: 'clean-view', key: 'turnClock' } as const, null as TurnClock | null)
 // where-am-i 讀這個值決定要不要讓出位置（where-am-i/hooks/register.tsx 的 cleanViewCombinedBox），改名要兩邊一起改
@@ -162,14 +162,30 @@ type RecapSummary = { goal: string; now: string; waiting: string }
 // 模組重新載入時 engine 會丟掉舊的 timer，這個變數也跟著重來
 let animation: { timer: Timer; intervalMs: number } | undefined
 
+// 使用者自己送出 prompt 的來源（按 Enter、Remote Control、SDK）；子代理的回報（2.1.299 是 peer）、背景工作的通知都不是
+const USER_PROMPT_ORIGINS: readonly string[] = ['composer', 'bridge', 'sdk']
+// 還算在跑的子代理；teammate 等訊息時是 idle，不算
+const ACTIVE_AGENT_STATUSES: readonly string[] = ['pending', 'running', 'waiting']
+// 下一個主回合是不是使用者自己送出的 prompt 開的：prompt.submit 記下，主回合開始時用掉；
+// 主回合結束時也清掉，回合中送進去的 prompt 不會開新回合，不能留給之後的回合
+let isUserPromptPending = false
+
+async function hasActiveAgents($: EngineInterface) {
+  try {
+    return (await $.agent.list()).some(agent => ACTIVE_AGENT_STATUSES.includes(agent.status))
+  } catch {
+    return false // 列不出子代理的 surface 就當作沒有
+  }
+}
+
 // 計畫、開關或回合狀態變動後都呼叫這裡：決定合併框的顯示模式，以及計時器要不要跑、跑多快
 async function refreshPlanBand($: EngineInterface) {
   const [enabled, steps, clock, currentMode] = await Promise.all([read($, isEnabled), read($, plan), read($, turnClock), read($, combinedBox)])
   const mode = combinedBoxMode(enabled, steps)
   // 沒變就不寫：寫入會讓讀它的 band（含 where-am-i）重畫
   if (mode !== currentMode) await update($, combinedBox, () => mode)
-  const turnRunning = clock !== null && clock.endedAt === null
-  syncAnimation($, enabled && turnRunning ? animationIntervalMs(steps) : null)
+  const isWorkRunning = clock !== null && clock.endedAt === null
+  syncAnimation($, enabled && isWorkRunning ? animationIntervalMs(steps) : null)
 }
 
 function syncAnimation($: EngineInterface, intervalMs: number | null) {
@@ -246,24 +262,36 @@ export const register: Register = on => {
   // 上一份計畫已全部完成才清掉；還沒做完的留著，Claude 可能下一輪接著做。
   // prompt 被擋下也無妨：做完的計畫在閒置時本來就不顯示
   on('prompt.submit', async ($, e, next) => {
+    isUserPromptPending = USER_PROMPT_ORIGINS.includes(e.origin?.kind)
     await update($, plan, current => (isPlanFinished(current) ? [] : current))
     await refreshPlanBand($)
     return next({ ...e, context: [...(e.context ?? []), LANGUAGE_REMINDER] })
   })
 
-  // subagent 的執行不會發 turn.start，只有主迴圈會
+  // 經過時間算的是一整次工作：從使用者送出 prompt，到主迴圈的回合結束而且子代理都跑完，使用者要看完整跑完花多久。
+  // 派出背景子代理後主迴圈的回合就結束了，子代理跑完會再開一個回合處理它的回報，這些都接著算。
+  // 只有使用者自己送出 prompt、而且沒有子代理在跑時才從 0 重新算；子代理在跑時使用者插話也接著算。
+  // 2.1.299 起子代理開始跑也會發 turn.start（帶 agentId，型別還沒寫），不能從那裡重新計時
   on('turn.start', async ($, e, next) => {
-    const startedAt = await $.clock.now()
-    await update($, turnClock, () => ({ startedAt, endedAt: null }))
-    await refreshPlanBand($)
+    if (!(e as { agentId?: string }).agentId) {
+      const isUserPrompt = isUserPromptPending
+      isUserPromptPending = false
+      const startedAt = await $.clock.now()
+      const isNewWork = isUserPrompt && !(await hasActiveAgents($))
+      await update($, turnClock, clock => (clock !== null && clock.endedAt === null && !isNewWork ? clock : { startedAt, endedAt: null }))
+      await refreshPlanBand($)
+    }
     return next(e)
   })
 
-  // 中斷（reason 為 aborted）也會發 turn.complete
+  // 中斷（reason 為 aborted）也會發 turn.complete；子代理還在跑就不停，等它回報的回合結束再停
   on('turn.complete', async ($, e, next) => {
     if (!e.agentId) {
-      const endedAt = await $.clock.now()
-      await update($, turnClock, clock => (clock ? { ...clock, endedAt } : clock))
+      isUserPromptPending = false
+      if (!(await hasActiveAgents($))) {
+        const endedAt = await $.clock.now()
+        await update($, turnClock, clock => (clock ? { ...clock, endedAt } : clock))
+      }
       await refreshPlanBand($)
     }
     return next(e)
@@ -468,7 +496,7 @@ function findKeyed(node: RenderNode, key: string): RenderNode | null {
   return null
 }
 
-// 回合進行中算到現在（只有這時才需要讀時鐘），結束了就停在結束那一刻；還沒有回合就不顯示
+// 工作還沒跑完就算到現在（只有這時才需要讀時鐘），跑完了就停在結束那一刻；還沒有工作就不顯示
 async function elapsedLabel($: EngineInterface, clock: TurnClock | null) {
   if (!clock) return null
   const end = clock.endedAt ?? (await $.clock.now())

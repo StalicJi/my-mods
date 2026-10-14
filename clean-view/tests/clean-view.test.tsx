@@ -105,6 +105,21 @@ async function cometHead($: any) {
   return bars[2]!.findLastIndex(color => color !== TRACK)
 }
 
+// 標題列右邊是不是顯示這個經過時間
+async function elapsedShown($: any, label: string) {
+  const ui = await mountBand($)
+  const found = await ui.find({ type: 'Text', text: new RegExp(`^${label}$`) })
+  await ui.unmount()
+  return found !== undefined
+}
+
+// $.agent.list() 的替身：回傳的陣列可以直接改，模擬子代理開始、跑完
+function fakeAgents(on: any): { id: string; status: string }[] {
+  const agents: { id: string; status: string }[] = []
+  on('agent.list', () => ({ value: agents.map(agent => ({ ...agent, description: '', type: 'general-purpose' })) }))
+  return agents
+}
+
 // 把畫出來的樹按順序攤平成文字：巢狀的 Text 要串起來才比對得到整句
 function textOf(node: any): string {
   if (typeof node === 'string') return node
@@ -436,6 +451,60 @@ describe('clean-view 進度條動畫', () => {
     await $.turn.complete({ reason: 'answer', answer: '', durationMs: 1, agentId: 'agent-1' } as any)
     await clock.advance(400)
     expect(await cometHead($)).toBe(2)
+  })
+
+  test('派出背景子代理後主回合結束，經過時間照樣往上算；子代理回報的回合接著算，全部跑完才停', async ($, on) => {
+    const clock = mock.clock(on)
+    const agents = fakeAgents(on)
+    await start($, on)
+    await $.prompt.submit({ text: '派子代理去做', origin: { kind: 'composer' } } as any)
+    await $.turn.start({ text: '派子代理去做', turnId: 'turn-1' } as any)
+    await reportPlan($, STEPS)
+    await clock.advance(3_000)
+    // 2.1.299 起子代理開始跑也會發 turn.start（帶 agentId），不能從這裡重新計時
+    agents.push({ id: 'agent-1', status: 'running' })
+    await $.turn.start({ text: '子代理的任務', turnId: 'turn-a', agentId: 'agent-1' } as any)
+    await clock.advance(1_000)
+    await $.turn.complete({ reason: 'answer', answer: '已派出', durationMs: 4_000 } as any)
+    await clock.advance(10_000)
+    expect(await elapsedShown($, '14秒')).toBe(true)
+
+    // 子代理回報：它的回報先送進來（來源不是使用者），接著它的回合結束，主對話開一個回合處理回報
+    await $.prompt.submit({ text: '<agent-message from="agent-1">', origin: { kind: 'peer' } } as any)
+    agents[0]!.status = 'completed'
+    await $.turn.complete({ reason: 'answer', answer: '做完了', durationMs: 11_000, agentId: 'agent-1' } as any)
+    await $.turn.start({ text: '<agent-message from="agent-1">', turnId: 'turn-2' } as any)
+    await clock.advance(2_000)
+    expect(await elapsedShown($, '16秒')).toBe(true)
+    await $.turn.complete({ reason: 'answer', answer: '', durationMs: 2_000 } as any)
+    await clock.advance(5_000)
+    expect(await elapsedShown($, '16秒')).toBe(true)
+  })
+
+  test('子代理還在跑時使用者送出的 prompt 接著算；子代理都跑完了，使用者送出的 prompt 才從 0 重新算', async ($, on) => {
+    const clock = mock.clock(on)
+    const agents = fakeAgents(on)
+    await start($, on)
+    await $.prompt.submit({ text: '派子代理去做', origin: { kind: 'composer' } } as any)
+    await $.turn.start({ text: '派子代理去做', turnId: 'turn-1' } as any)
+    await reportPlan($, STEPS)
+    agents.push({ id: 'agent-1', status: 'running' })
+    await $.turn.complete({ reason: 'answer', answer: '已派出', durationMs: 1 } as any)
+    await clock.advance(5_000)
+
+    await $.prompt.submit({ text: '進度如何', origin: { kind: 'composer' } } as any)
+    await $.turn.start({ text: '進度如何', turnId: 'turn-2' } as any)
+    await clock.advance(1_000)
+    expect(await elapsedShown($, '6秒')).toBe(true)
+    await $.turn.complete({ reason: 'answer', answer: '還在跑', durationMs: 1 } as any)
+
+    // 子代理跑完但沒有回報的回合（例如被停掉），下一個使用者的 prompt 是新的一次
+    agents[0]!.status = 'killed'
+    await clock.advance(30_000)
+    await $.prompt.submit({ text: '下一件事', origin: { kind: 'composer' } } as any)
+    await $.turn.start({ text: '下一件事', turnId: 'turn-3' } as any)
+    await clock.advance(2_000)
+    expect(await elapsedShown($, '2秒')).toBe(true)
   })
 
   test('prompt 送出但回合沒開始（例如被擋下）時不跑', async ($, on) => {

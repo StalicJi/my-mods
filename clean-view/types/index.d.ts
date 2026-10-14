@@ -5,7 +5,7 @@ export type PlanStep = { title: string; status: PlanStatus }
 // 合併框何時顯示：hidden 不顯示、whileWorking 只在回合進行中（計畫已做完）、always 一直顯示（計畫還沒做完）
 export type CombinedBoxMode = 'hidden' | 'whileWorking' | 'always'
 
-// 主迴圈目前（或最近一次）回合的起訖時間；endedAt 是 null 表示回合還在跑
+// 目前（或最近一次）工作的起訖時間：從使用者送出 prompt，到主迴圈的回合結束而且子代理都跑完；endedAt 是 null 表示還在跑
 export type TurnClock = { startedAt: number; endedAt: number | null }
 
 declare module 'claude-code' {
