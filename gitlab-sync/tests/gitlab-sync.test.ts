@@ -464,7 +464,7 @@ describe('整合情境', () => {
     notes = [{ id: 9551, system: false, body: '謝謝回報，查清楚了。', created_at: iso(T0 + 60_000), author: BOB }]
     await clock.advance(3 * 60_000) // 背景每分鐘一輪，GitLab 每兩分鐘輪詢一次
     expect(toasts).toContain('GitLab：bob 在 web-app#5 留言：謝謝回報，查清楚了。')
-    for (const surface of ['terminal', 'desktop'] as const) expect(await footerText($, surface)).toContain('GitLab 1 則新動態（/gitlab）')
+    expect(await footerText()).toContain('GitLab 1 則新動態（/gitlab）')
 
     const report = await runGitlab($)
     expect(report).toContain('GitLab 新動態 1 則（已標為已讀）：')

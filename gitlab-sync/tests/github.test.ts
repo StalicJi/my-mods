@@ -281,7 +281,7 @@ describe('整合情境', () => {
     timeline = [commented(7001, OCTO, '我這邊也重現了', T0 + 60_000)]
     await clock.advance(3 * 60_000)
     expect(toasts).toContain('GitHub：octocat 在 notes-app#3 留言：我這邊也重現了')
-    for (const surface of ['terminal', 'desktop'] as const) expect(await footerText($, surface)).toContain('GitHub 1 則新動態（/github）')
+    expect(await footerText()).toContain('GitHub 1 則新動態（/github）')
 
     const report = await runGithub($)
     expect(report).toContain('這個 repo（notes-app）裡 GitHub 新動態 1 則（已標為已讀）：')
