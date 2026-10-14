@@ -61,6 +61,8 @@ function engine(on: any, drawBand?: ($: any, e: any) => unknown) {
   })
   on('turn.start', () => ({ turnId: 'turn-1' }))
   on('turn.complete', () => ({ text: '' }))
+  on('classic.Stop', () => ({}))
+  on('classic.SubagentStop', () => ({}))
   on('ui.render', ($: any, e: any) => {
     if (drawBand !== undefined) return drawBand($, e)
     const { Text } = $.ui.resolve(e)
@@ -531,6 +533,44 @@ describe('clean-view 進度條動畫', () => {
     await $.turn.start({ text: '下一件事', turnId: 'turn-3' } as any)
     await clock.advance(2_000)
     expect(await elapsedShown($, '2秒')).toBe(true)
+  })
+
+  test('workflow 的子代理也算進去：主回合結束時 workflow 還在跑就不停，跑完通知的回合結束才停', async ($, on) => {
+    const clock = mock.clock(on)
+    fakeAgents(on) // workflow 的子代理不會出現在 $.agent.list()
+    const workflowRunning = [{ id: 'wo1', type: 'workflow', status: 'running', description: '兩段測試', name: 'probe-run' }]
+    await start($, on)
+    await $.prompt.submit({ text: '跑 workflow', origin: { kind: 'composer' } } as any)
+    await $.turn.start({ text: '跑 workflow', turnId: 'turn-1' } as any)
+    await reportPlan($, STEPS)
+    await clock.advance(3_000)
+    await $.turn.start({ text: '[Workflow harness — computed task]', turnId: 'turn-w1', agentId: 'wf-agent-1' } as any)
+    // 主回合結束前約 0.1 秒有 classic.Stop，它的 background_tasks 列出還在跑的 workflow
+    await $.classic.Stop({ stop_hook_active: false, background_tasks: workflowRunning } as any)
+    await $.turn.complete({ reason: 'answer', answer: '已啟動', durationMs: 3_000 } as any)
+    await clock.advance(20_000)
+    expect(await elapsedShown($, '23秒')).toBe(true)
+
+    // workflow 還在跑時使用者插話，接著算
+    await $.prompt.submit({ text: '進度如何', origin: { kind: 'composer' } } as any)
+    await $.turn.start({ text: '進度如何', turnId: 'turn-2' } as any)
+    await clock.advance(1_000)
+    expect(await elapsedShown($, '24秒')).toBe(true)
+    await $.classic.Stop({ stop_hook_active: false, background_tasks: workflowRunning } as any)
+    await $.turn.complete({ reason: 'answer', answer: '還在跑', durationMs: 1_000 } as any)
+
+    await clock.advance(10_000)
+    await $.turn.complete({ reason: 'answer', answer: '一號好了', durationMs: 30_000, agentId: 'wf-agent-1' } as any)
+    await $.classic.SubagentStop({ stop_hook_active: false, agent_id: 'wf-agent-1', background_tasks: workflowRunning } as any)
+    // workflow 跑完：通知開一個主回合，那一回合結束前的 classic.Stop 已經沒有背景工作
+    await $.prompt.submit({ text: '<task-notification>', origin: { kind: 'task-notification' } } as any)
+    await $.turn.start({ text: '<task-notification>', turnId: 'turn-3' } as any)
+    await clock.advance(2_000)
+    expect(await elapsedShown($, '36秒')).toBe(true)
+    await $.classic.Stop({ stop_hook_active: false, background_tasks: [] } as any)
+    await $.turn.complete({ reason: 'answer', answer: 'workflow 完成', durationMs: 2_000 } as any)
+    await clock.advance(5_000)
+    expect(await elapsedShown($, '36秒')).toBe(true)
   })
 
   test('prompt 送出但回合沒開始（例如被擋下）時不跑', async ($, on) => {

@@ -172,11 +172,21 @@ let animation: { timer: Timer; intervalMs: number } | undefined
 const USER_PROMPT_ORIGINS: readonly string[] = ['composer', 'bridge', 'sdk']
 // 還算在跑的子代理；teammate 等訊息時是 idle，不算
 const ACTIVE_AGENT_STATUSES: readonly string[] = ['pending', 'running', 'waiting']
+// 最近一次 classic.Stop／classic.SubagentStop 回報的背景工作裡，有沒有還沒跑完的 workflow。workflow 的子代理不會出現在
+// $.agent.list()，只有這裡看得到；workflow 跑完會送通知開一個主回合，那一回合結束前的 classic.Stop 就會更新成 false。
+// 背景的 shell、monitor 不算：dev server 這種一直不會結束，算進去計時就停不下來
+let isWorkflowRunning = false
+
+function noteBackgroundTasks(tasks: readonly { type: string }[] | undefined) {
+  if (tasks !== undefined) isWorkflowRunning = tasks.some(task => task.type === 'workflow')
+}
 // 下一個主回合是不是使用者自己送出的 prompt 開的：prompt.submit 記下，主回合開始時用掉；
 // 主回合結束時也清掉，回合中送進去的 prompt 不會開新回合，不能留給之後的回合
 let isUserPromptPending = false
 
-async function hasActiveAgents($: EngineInterface) {
+// 子代理或 workflow 還有沒跑完的
+async function isAgentWorkRunning($: EngineInterface) {
+  if (isWorkflowRunning) return true
   try {
     return (await $.agent.list()).some(agent => ACTIVE_AGENT_STATUSES.includes(agent.status))
   } catch {
@@ -280,32 +290,43 @@ export const register: Register = on => {
     return next({ ...e, context: [...(e.context ?? []), LANGUAGE_REMINDER] })
   })
 
-  // 經過時間算的是一整次工作：從使用者送出 prompt，到主迴圈的回合結束而且子代理都跑完，使用者要看完整跑完花多久。
-  // 派出背景子代理後主迴圈的回合就結束了，子代理跑完會再開一個回合處理它的回報，這些都接著算。
-  // 只有使用者自己送出 prompt、而且沒有子代理在跑時才從 0 重新算；子代理在跑時使用者插話也接著算。
+  // 經過時間算的是一整次工作：從使用者送出 prompt，到主迴圈的回合結束而且子代理、workflow 都跑完，使用者要看完整跑完花多久。
+  // 派出背景子代理或 workflow 後主迴圈的回合就結束了，跑完會再開一個回合處理回報或通知，這些都接著算。
+  // 只有使用者自己送出 prompt、而且沒有子代理或 workflow 在跑時才從 0 重新算；它們在跑時使用者插話也接著算。
   // 2.1.299 起子代理開始跑也會發 turn.start（帶 agentId，型別還沒寫），不能從那裡重新計時
   on('turn.start', async ($, e, next) => {
     if (!(e as { agentId?: string }).agentId) {
       const isUserPrompt = isUserPromptPending
       isUserPromptPending = false
       const startedAt = await $.clock.now()
-      const isNewWork = isUserPrompt && !(await hasActiveAgents($))
+      const isNewWork = isUserPrompt && !(await isAgentWorkRunning($))
       await update($, turnClock, clock => (clock !== null && clock.endedAt === null && !isNewWork ? clock : { startedAt, endedAt: null }))
       await refreshPlanBand($)
     }
     return next(e)
   })
 
-  // 中斷（reason 為 aborted）也會發 turn.complete；子代理還在跑就不停，等它回報的回合結束再停
+  // 中斷（reason 為 aborted）也會發 turn.complete；子代理或 workflow 還在跑就不停，等它們回報或通知的回合結束再停
   on('turn.complete', async ($, e, next) => {
     if (!e.agentId) {
       isUserPromptPending = false
-      if (!(await hasActiveAgents($))) {
+      if (!(await isAgentWorkRunning($))) {
         const endedAt = await $.clock.now()
         await update($, turnClock, clock => (clock ? { ...clock, endedAt } : clock))
       }
       await refreshPlanBand($)
     }
+    return next(e)
+  })
+
+  // 主迴圈停下前（約在 turn.complete 前 0.1 秒）與每個子代理停下時都會回報還在跑的背景工作，只讀不改
+  on('classic.Stop', async ($, e, next) => {
+    noteBackgroundTasks(e.background_tasks)
+    return next(e)
+  })
+
+  on('classic.SubagentStop', async ($, e, next) => {
+    noteBackgroundTasks(e.background_tasks)
     return next(e)
   })
 
