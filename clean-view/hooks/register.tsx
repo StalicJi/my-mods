@@ -24,6 +24,7 @@ const ORANGE = '#f79a4f'
 const PINK = '#ec4f8f'
 const ACCENT_COLORS = [ORANGE, PINK, '#b45ce6', '#6f7df2']
 const TITLE_MARK = '✳ '
+const PLAN_FINISHED_TITLE = '全部完成'
 const TITLE_COLOR = ORANGE
 const ELAPSED_COLUMNS = 10 // 「1小時05分」寬 9，再空一格
 const COMET_COLOR_HALF_PERIOD_FRAMES = 15 // 從橘變到藍約 3 秒
@@ -544,9 +545,10 @@ async function elapsedLabel($: EngineInterface, clock: TurnClock | null) {
 
 type TitleRow = { text: string; elapsed: string | null }
 
-// 標題列：左邊「✳ 目標」，where-am-i 還沒有摘要時改用目前步驟的標題；右邊是經過時間。兩邊都沒有就不畫
+// 標題列：左邊「✳ 目標」，where-am-i 還沒有摘要時改用目前步驟的標題，計畫全部做完（沒有目前步驟）時寫「全部完成」；
+// 右邊是經過時間。兩邊都沒有就不畫
 export function titleRow(goal: string, steps: readonly PlanStep[], elapsed: string | null, innerColumns: number): TitleRow | null {
-  const subject = goal || (steps[currentStepIndex(steps)]?.title ?? '')
+  const subject = goal || (steps[currentStepIndex(steps)]?.title ?? (isPlanFinished(steps) ? PLAN_FINISHED_TITLE : ''))
   const fitted = fitToWidth(subject, innerColumns - displayWidth(TITLE_MARK) - ELAPSED_COLUMNS)
   const text = fitted ? TITLE_MARK + fitted : ''
   if (!text && elapsed === null) return null

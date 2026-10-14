@@ -239,6 +239,9 @@ describe('clean-view', () => {
     await clock.advance(30_000)
     expect(await isBoxDrawn($, { isWorking: false })).toBe(true)
     expect(await elapsedShown($, '7秒', { isWorking: false })).toBe(true)
+    const idle = await mountBand($, { isWorking: false })
+    expect(await idle.find({ type: 'Text', text: /^✳ 全部完成$/ })).toBeDefined()
+    await idle.unmount()
 
     await $.prompt.submit({ text: '下一件事' } as any)
     expect(await isBoxDrawn($, { isWorking: false })).toBe(false)
@@ -814,7 +817,8 @@ describe('clean-view 純函式', () => {
     const steps = parseSteps(STEPS)!
     expect(titleRow('合併兩個框', steps, '3秒', 116)).toEqual({ text: '✳ 合併兩個框', elapsed: '3秒' })
     expect(titleRow('', steps, '3秒', 116)).toEqual({ text: '✳ 修改 config.ts', elapsed: '3秒' })
-    expect(titleRow('', DONE_STEPS, '5秒', 116)).toEqual({ text: '', elapsed: '5秒' }) // 全部完成，沒有目前步驟
+    expect(titleRow('', DONE_STEPS, '5秒', 116)).toEqual({ text: '✳ 全部完成', elapsed: '5秒' }) // 沒有目前步驟，左邊不留空
+    expect(titleRow('合併兩個框', DONE_STEPS, '5秒', 116)).toEqual({ text: '✳ 合併兩個框', elapsed: '5秒' }) // 有目標照舊用目標
     expect(titleRow('', [], null, 116)).toBeNull()
     expect(titleRow('合併兩個框', steps, null, 10)).toBeNull() // 太窄放不下標題，也沒有時間
   })
