@@ -106,8 +106,8 @@ async function cometHead($: any) {
 }
 
 // 標題列右邊是不是顯示這個經過時間
-async function elapsedShown($: any, label: string) {
-  const ui = await mountBand($)
+async function elapsedShown($: any, label: string, props: Partial<typeof BAND_PROPS> = {}) {
+  const ui = await mountBand($, props)
   const found = await ui.find({ type: 'Text', text: new RegExp(`^${label}$`) })
   await ui.unmount()
   return found !== undefined
@@ -226,13 +226,39 @@ describe('clean-view', () => {
     await ui.unmount()
   })
 
-  test('做完的計畫只在回合中顯示，下一個 prompt 送出時清掉', async ($, on) => {
+  test('做完的計畫閒置時也留著，標題列停在最後的經過時間；下一個 prompt 送出時清掉', async ($, on) => {
+    const clock = mock.clock(on)
     await start($, on)
+    await $.turn.start({ text: '開始', turnId: 'turn-1' } as any)
+    await reportPlan($, STEPS)
+    await clock.advance(7_000)
     await reportPlan($, DONE_STEPS)
-    expect(await isBoxDrawn($, { isWorking: true })).toBe(true)
-    expect(await isBoxDrawn($, { isWorking: false })).toBe(false)
+    await $.turn.complete({ reason: 'answer', answer: '', durationMs: 7_000 } as any)
+    await clock.advance(30_000)
+    expect(await isBoxDrawn($, { isWorking: false })).toBe(true)
+    expect(await elapsedShown($, '7秒', { isWorking: false })).toBe(true)
+
     await $.prompt.submit({ text: '下一件事' } as any)
+    expect(await isBoxDrawn($, { isWorking: false })).toBe(false)
     expect(await isBoxDrawn($, { isWorking: true })).toBe(false)
+  })
+
+  test('next-steps 的建議清單顯示時，合併框先讓出清單的列數，選項才不會被收成「n more」', async ($, on) => {
+    let isOffering = false
+    on('state.get', { plugin: 'next-steps', key: 'active' }, () => ({ value: { value: isOffering, version: 1 } }))
+    await start($, on)
+    await reportPlan($, Array.from({ length: 6 }, (_, i) => ({ title: `步驟 ${i + 1}`, status: 'completed' })))
+    // 框線 2 列、標題列 1 列、整體進度與「計畫：」2 列，六個步驟 6 列，共 11 列
+    const alone = await mountBand($, { isWorking: false, maxRows: 12 })
+    expect(await alone.find({ type: 'Text', text: /^步驟 6$/ })).toBeDefined()
+    await alone.unmount()
+
+    // 清單最多 7 列，框只剩 5 列：做完的步驟收成一列，再拿掉框（標題、整體進度、「計畫：」、已完成 6 項）
+    isOffering = true
+    const withList = await mountBand($, { isWorking: false, maxRows: 12 })
+    expect(await withList.find({ type: 'Text', text: /^已完成 6 項$/ })).toBeDefined()
+    expect(await withList.find({ type: 'Text', text: /^步驟 6$/ })).toBeUndefined()
+    await withList.unmount()
   })
 
   test('有問卷時讓出 band', async ($, on) => {
@@ -608,13 +634,11 @@ describe('clean-view 純函式', () => {
   test('合併框的顯示模式', () => {
     const steps = parseSteps(STEPS)!
     expect(combinedBoxMode(true, steps)).toBe('always')
-    expect(combinedBoxMode(true, DONE_STEPS)).toBe('whileWorking')
+    expect(combinedBoxMode(true, DONE_STEPS)).toBe('always') // 做完了也留著，看最後停在幾秒
     expect(combinedBoxMode(true, [])).toBe('hidden')
     expect(combinedBoxMode(false, steps)).toBe('hidden')
-    expect(isCombinedBoxShown('always', false)).toBe(true)
-    expect(isCombinedBoxShown('whileWorking', false)).toBe(false)
-    expect(isCombinedBoxShown('whileWorking', true)).toBe(true)
-    expect(isCombinedBoxShown('hidden', true)).toBe(false)
+    expect(isCombinedBoxShown('always')).toBe(true)
+    expect(isCombinedBoxShown('hidden')).toBe(false)
   })
 
   test('方格顏色：完成綠漸層、未開始只有灰色底、進行中是帶漸暗尾巴的彗星、暫停停住變淺灰', () => {

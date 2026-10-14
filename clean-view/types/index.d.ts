@@ -2,8 +2,8 @@ export type PlanStatus = 'pending' | 'in_progress' | 'completed'
 
 export type PlanStep = { title: string; status: PlanStatus }
 
-// 合併框何時顯示：hidden 不顯示、whileWorking 只在回合進行中（計畫已做完）、always 一直顯示（計畫還沒做完）
-export type CombinedBoxMode = 'hidden' | 'whileWorking' | 'always'
+// 合併框何時顯示：hidden 不顯示（沒有計畫或 /clean 關掉）、always 一直顯示（計畫做完了也留著，看最後停在幾秒，下一個 prompt 送出時清掉）
+export type CombinedBoxMode = 'hidden' | 'always'
 
 // 目前（或最近一次）工作的起訖時間：從使用者送出 prompt，到主迴圈的回合結束而且子代理都跑完；endedAt 是 null 表示還在跑
 export type TurnClock = { startedAt: number; endedAt: number | null }
@@ -20,5 +20,7 @@ declare module 'claude-code' {
     }
     // where-am-i 擁有，這裡只讀來放進合併框；形狀要跟它自己的合約一致
     'where-am-i': { recap: { goal: string; now: string; waiting: string; next: string } | null; live: string }
+    // next-steps 擁有（next-steps/types/index.d.ts），這裡只讀來讓出它建議清單的列數
+    'next-steps': { active: boolean }
   }
 }

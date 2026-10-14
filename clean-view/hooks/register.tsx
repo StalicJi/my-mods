@@ -71,13 +71,19 @@ const plan = atom({ plugin: 'clean-view', key: 'plan' } as const, [] as PlanStep
 // 只有 band 讀它，所以動畫只會讓 band 重畫；用 $.ui.invalidate 會連 transcript 每一列都重跑
 const tick = atom({ plugin: 'clean-view', key: 'tick' } as const, 0)
 // 一次工作的起訖時間（含背景子代理跑的時間，見 turn.start）：動畫計時器看它判斷工作是否進行中，標題列用它算經過秒數；
-// 畫面要不要顯示一律看 band 自己的 e.props.isWorking
+// 合併框要不要顯示看 combinedBox，跟它無關
 const turnClock = atom({ plugin: 'clean-view', key: 'turnClock' } as const, null as TurnClock | null)
 // where-am-i 讀這個值決定要不要讓出位置（where-am-i/hooks/register.tsx 的 cleanViewCombinedBox），改名要兩邊一起改
 const combinedBox = atom({ plugin: 'clean-view', key: 'combinedBox' } as const, 'hidden' as CombinedBoxMode)
 // where-am-i 擁有的摘要，合併框讀來顯示目標、目前、等你
 const whereAmIRecap = { plugin: 'where-am-i', key: 'recap' } as const
 const whereAmILive = { plugin: 'where-am-i', key: 'live' } as const
+// next-steps 的建議清單是否顯示中。清單由外層的 next-steps 接在合併框下面、閒置時才出現；整排超過 maxRows 時
+// Claude Code 會把最下面收成「n more」，最先藏起來的就是那些選項，所以清單顯示中合併框要先讓出它的列數
+const nextStepsActive = { plugin: 'next-steps', key: 'active' } as const
+// 清單最多佔的列數：框 2 列、「next:」1 列、最多 3 個建議、dismiss 1 列（next-steps/hooks/register.tsx 的 FRAME_ROWS、
+// MAX_SUGGESTIONS），那邊改了這裡要跟著改
+const NEXT_STEPS_LIST_ROWS = 7
 
 // 看畫面的人讀的語言；計畫工具的說明、主對話的計畫指示與子代理的語言要求共用，換語言只改這裡
 const READER_LANGUAGE = 'Traditional Chinese (Taiwan usage)'
@@ -207,6 +213,12 @@ export function animationIntervalMs(steps: readonly PlanStep[]): number | null {
   const hasComet = steps.some(step => step.status === 'in_progress')
   const hasShimmer = countCompleted(steps) > 0 && !isPlanFinished(steps)
   return hasComet || hasShimmer ? ANIMATION_MS : CLOCK_ONLY_MS
+}
+
+// next-steps 沒裝時讀不到，當作沒有清單
+async function isNextStepsOffering($: EngineInterface): Promise<boolean> {
+  const { value } = await $.state.get(nextStepsActive).catch(() => ({ value: undefined }))
+  return value === true
 }
 
 // where-am-i 沒裝或還沒有摘要時回傳 null，合併框就只畫計畫
@@ -351,20 +363,27 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const rest = await next(e) // 其他 mod 與 Claude Code 自己畫的內容保留在下面
     const mode = await read($, combinedBox)
-    if (e.props.hasSurvey || !isCombinedBoxShown(mode, e.props.isWorking)) return rest
+    if (e.props.hasSurvey || !isCombinedBoxShown(mode)) return rest
 
     const { Box, Text } = $.ui.resolve(e)
     const innerColumns = e.props.bodyColumns - BOX_CHROME_COLUMNS
-    const [summary, clock, steps, frame] = await Promise.all([readRecapSummary($), read($, turnClock), read($, plan), read($, tick)])
+    const [summary, clock, steps, frame, isNextStepsShown] = await Promise.all([
+      readRecapSummary($),
+      read($, turnClock),
+      read($, plan),
+      read($, tick),
+      isNextStepsOffering($),
+    ])
     const title = titleRow(summary?.goal ?? '', steps, await elapsedLabel($, clock), innerColumns)
     const rowsAbove = rowsAbovePlan(title, summary)
     const gitlabRows = rowsOfGitlabLine(rest)
+    const maxRows = e.props.maxRows - (isNextStepsShown ? NEXT_STEPS_LIST_ROWS : 0)
     const viewFor = (rows: number) => planView(steps, { frame, isWorking: e.props.isWorking, columns: innerColumns, rows })
     // 先照有框排：讓出 gitlab-sync 那一段的列數。計畫列數有下限，視窗太矮時還是放不下，就把合併框與 gitlab-sync 那一段的框
     // 一起拿掉（使用者選的「放不下先拿掉框」），省下 4 列；拿掉框時改用兩格內距，文字留在同一欄、可用寬度不變
-    const framedView = viewFor(e.props.maxRows - BOX_BORDER_ROWS - rowsAbove - gitlabRows)
-    const isFramed = combinedBoxRows(rowsAbove, framedView.rows.length, true) + gitlabRows <= e.props.maxRows
-    const view = isFramed ? framedView : viewFor(e.props.maxRows - rowsAbove - Math.min(gitlabRows, 1))
+    const framedView = viewFor(maxRows - BOX_BORDER_ROWS - rowsAbove - gitlabRows)
+    const isFramed = combinedBoxRows(rowsAbove, framedView.rows.length, true) + gitlabRows <= maxRows
+    const view = isFramed ? framedView : viewFor(maxRows - rowsAbove - Math.min(gitlabRows, 1))
     const below = isFramed ? rest : replaceKeyed(rest, GITLAB_BAND_KEY, withoutFrame)
     return (
       <Box flexDirection="column">
@@ -440,14 +459,13 @@ function withSubagentLanguageNote(prompt: string) {
   return `${prompt.trimEnd()}\n\n${SUBAGENT_LANGUAGE_NOTE}`
 }
 
+// 做完的計畫閒置時也留著，使用者要看最後停在幾秒；下一個 prompt 送出時才清掉（見 prompt.submit）
 export function combinedBoxMode(enabled: boolean, steps: readonly PlanStep[]): CombinedBoxMode {
-  if (!enabled || steps.length === 0) return 'hidden'
-  return isPlanFinished(steps) ? 'whileWorking' : 'always'
+  return !enabled || steps.length === 0 ? 'hidden' : 'always'
 }
 
-// where-am-i/hooks/register.tsx 有同一行判斷（兩個 mod 不能共用程式碼），改規則要兩邊一起改
-export function isCombinedBoxShown(mode: CombinedBoxMode, isWorking: boolean) {
-  return mode === 'always' || (mode === 'whileWorking' && isWorking)
+export function isCombinedBoxShown(mode: CombinedBoxMode) {
+  return mode === 'always'
 }
 
 // 計畫區塊上方、框線以外的列數：標題列、目前、等你；跟 JSX 裡畫哪些列要一致
