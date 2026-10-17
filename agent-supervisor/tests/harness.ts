@@ -7,7 +7,8 @@ type SpawnReply = { model?: string; agentId?: string; deny?: string; teammateId?
 type Pane = { id: string; title: string; isShown: boolean; isFocused: boolean; isPlaced: boolean }
 
 // 代替 mod 底下的 engine：記下開關窗格、狀態列與註冊的指令；agent.spawn 依序回 a1、a2…（spawnReplies 有排定的先用）；
-// tool.call 依序回 toolReplies（排完了回成功）；$.agent.list() 回 listed
+// tool.call 依序回 toolReplies（排完了回成功）；$.agent.list() 回 listed；
+// 快照：$.fs.write 記在 writes，HOME 是 /home/test，session id 是 sess-1，$.process.run 回 pid（null 時讓它失敗）
 export function engine(on: any, initialState: Record<string, unknown> = {}) {
   const control = {
     opens: [] as any[],
@@ -25,6 +26,8 @@ export function engine(on: any, initialState: Record<string, unknown> = {}) {
     listCalls: 0,
     state: stateStore(on, initialState),
     clock: mock.clock(on),
+    writes: [] as { path: string; text: string }[],
+    pid: '4242' as string | null,
   }
   on('session.start', (_$: any, e: any) => ({ sessionId: 's', cwd: e.cwd }))
   on('session.end', () => ({ sessionId: 's' }))
@@ -47,6 +50,17 @@ export function engine(on: any, initialState: Record<string, unknown> = {}) {
     return { value: undefined }
   })
   on('ui.panes', () => ({ value: control.panes }))
+  on('fs.write', (_$: any, e: any) => {
+    control.writes.push({ path: e.path, text: e.text })
+    return { value: undefined }
+  })
+  on('env.get', (_$: any, e: any) => ({ value: e.name === 'HOME' ? '/home/test' : undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('session.cwd', () => ({ value: '/w' }))
+  on('process.run', () => {
+    if (control.pid === null) throw new Error('不能執行')
+    return { value: { exitCode: 0, stdout: `${control.pid}\n`, stderr: '' } }
+  })
   on('ui.status', (_$: any, e: any) => {
     control.statuses.push(e.text)
     return { value: undefined }

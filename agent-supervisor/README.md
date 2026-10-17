@@ -59,6 +59,35 @@ claude plugin install agent-supervisor@my-mods
 - 終端機夠寬（全螢幕版面 110 欄以上）時停靠在右邊，總覽列最近 3 筆事件。
 - 窄的時候（例如 cmux 分割的窗格）放在輸入框上方，改用精簡版：每個代理一列、最多 3 個代理與 3 項任務、不列事件，阻塞與建議照樣顯示。每一列依顯示寬度截斷，不會折行。
 
+## 給外部 App 的快照
+
+面板的狀態也會寫成一份 JSON，給外部 App（例如 Splex 終端機）顯示同樣的內容：
+
+- 路徑：`~/.claude/agent-supervisor/sessions/<session id>.json`，每個 session 一份。
+- 時機：代理、任務、等待原因或主對話活動改變後約 0.5 秒寫一次，連續的改變合併成一次；內容沒變不重寫。
+- session 結束時寫入 `"ended": true`（mod 沒有刪檔的 API）。
+- `pid` 是 Claude Code 本身的程序，外部 App 用它比對是哪個終端機窗格；取不到時是 `null`，改用 `cwd` 比對。
+- `waiting` 的 `isMain` 為 `true` 表示主對話在等：子代理不能直接問使用者，只有這種等待代表在等你（Splex 只對這種跳 WAIT 提醒）。
+- 檔案直接覆寫、不是原子寫入：讀的一方讀到不完整的 JSON 時，沿用上一次的內容即可。
+
+格式（`version` 有不相容的改動時加一，欄位見 `hooks/snapshot.ts` 的 `SupervisorSnapshot`）：
+
+```json
+{
+  "version": 1, "sessionId": "…", "pid": 4242, "cwd": "/Users/me/app", "updatedAt": 1792233300000, "ended": false,
+  "main": { "isRunning": true, "activity": "委派", "activityAt": 1792233290000 },
+  "agents": [{ "id": "a1", "name": "定義 API schema", "status": "RUNNING", "isInferred": false, "activity": "讀取 schema.json",
+               "detail": null, "failureReason": null, "startedAt": 1792233220000, "endedAt": null, "toolCount": 3,
+               "activityAt": 1792233280000 }],
+  "tasks": [{ "id": "T2", "title": "做前端畫面", "status": "pending", "owner": "做前端畫面", "blockedBy": ["T1"] }],
+  "progress": { "completed": 0, "total": 2, "percent": 0 },
+  "waiting": [{ "reporter": "做前端畫面", "isMain": false, "text": "等 API schema", "at": 1792233250000 }],
+  "attention": [{ "subject": "做前端畫面", "dependsOn": "定義 API schema", "reason": "…", "source": "dependency", "certainty": "confirmed", "taskId": "T2" }],
+  "suggestions": ["先完成「定義 API schema」…"],
+  "events": [{ "at": 1792233250000, "kind": "waiting", "text": "做前端畫面 回報在等：等 API schema" }]
+}
+```
+
 ## 面板上的資訊從哪裡來
 
 面板只顯示真的觀察到或回報過的資料，不知道的寫 `Unknown`，不編造進度。

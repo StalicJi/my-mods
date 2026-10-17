@@ -7,6 +7,8 @@ import type { AgentRecord, MainLoop, SupervisorEvent, SupervisorView, TaskRecord
 import { addSpawn, adoptListed, capAgents, describeTool, finishAgent, hasLive, reconcile, recordActivity, recordToolOutcome, toolOutcomeOf } from './agents'
 import type { FinishReason, ListedAgent, ToolOutcome } from './agents'
 import { appendEvents, taskEvents, waitingEvents } from './events'
+import { buildSnapshot, snapshotPath, snapshotSignature } from './snapshot'
+import type { SnapshotIdentity } from './snapshot'
 import { applyNativeTool, applyReport, parseReport, resolvePendingOwners, setWaiting } from './tasks'
 import { viewRows } from './view'
 import type { Span } from './view'
@@ -82,6 +84,8 @@ const SUBAGENT_NOTE = [
 const IDLE_MAIN: MainLoop = { isRunning: false, activity: '', activityAt: null }
 // 剛載入時不知道輸入框下方是什麼（熱重載前可能留著舊的狀態列），用它讓第一次同步一定送出
 const STATUS_UNKNOWN = Symbol('status-unknown')
+// 狀態改變後等這麼久才寫快照，連續的改變合併成一次寫入
+const SNAPSHOT_DELAY_MS = 500
 // 版本衝突時最多重試幾次，跟 claude-code 的 update 一樣
 const WRITE_ATTEMPTS = 64
 
@@ -102,6 +106,10 @@ let timer: Timer | undefined
 let tickCount = 0
 // 上一次送給 $.ui.status 的文字；相同就不再送，每送一次輸入框下方就重畫一次
 let shownStatus: string | undefined | typeof STATUS_UNKNOWN = STATUS_UNKNOWN
+// 快照：排定中的寫入、上一次寫出的內容（相同就不寫）、這個 session 的身分與檔案路徑（session 開始時重取）
+let snapshotTimer: Timer | undefined
+let lastSnapshotSignature: string | undefined
+let snapshotTarget: { identity: SnapshotIdentity; path: string } | null | undefined
 
 // 更新代理清單；沒有變化就不寫（每次寫入都讓面板重畫），版本衝突時重讀再試
 async function changeAgents($: EngineInterface, change: (agents: AgentRecord[]) => AgentRecord[]): Promise<AgentRecord[]> {
@@ -110,7 +118,10 @@ async function changeAgents($: EngineInterface, change: (agents: AgentRecord[]) 
     const current = held.value ?? []
     const next = capAgents(change(current))
     if (next === current) return current
-    if ((await $.state.set(AGENTS_REF, next, { ifVersion: held.version })).isSet) return next
+    if ((await $.state.set(AGENTS_REF, next, { ifVersion: held.version })).isSet) {
+      markSnapshotDirty($)
+      return next
+    }
   }
   throw new Error('changeAgents: 每次讀到之後都被別人搶先寫入，試到上限仍沒寫進去')
 }
@@ -167,12 +178,15 @@ async function refreshNow($: EngineInterface): Promise<void> {
 }
 
 async function recordEvents($: EngineInterface, added: readonly SupervisorEvent[]): Promise<void> {
+  // 任務與等待原因改變時一定伴隨事件，從這裡標記快照要更新
+  markSnapshotDirty($)
   if (added.length === 0) return
   await update($, eventsAtom, events => appendEvents(events, added))
 }
 
 // 有還沒結束的代理時跑計時器、沒有就停；面板沒開時在輸入框下方釘一行狀態，開了或都結束了就清掉
 async function syncTimerAndStatus($: EngineInterface): Promise<void> {
+  markSnapshotDirty($)
   try {
     const [agents, isOpen] = await Promise.all([read($, agentsAtom), isPanelOpen($)])
     const liveCount = agents.filter(agent => agent.phase === 'running' || agent.phase === 'idle').length
@@ -252,6 +266,55 @@ async function recordAgentActivity($: EngineInterface, agentId: string, activity
 async function recordMainActivity($: EngineInterface, activity: string) {
   const at = await $.clock.now()
   await update($, mainAtom, main => ({ ...main, activity, activityAt: at }))
+  markSnapshotDirty($)
+}
+
+// MARK: 快照（給外部 App 讀，見 snapshot.ts）
+
+function markSnapshotDirty($: EngineInterface) {
+  if (snapshotTimer !== undefined) return
+  snapshotTimer = $.clock.after(SNAPSHOT_DELAY_MS, () => {
+    snapshotTimer = undefined
+    void writeSnapshot($)
+  })
+}
+
+// session 的身分只取一次：id、目錄、HOME，以及 Claude Code 的 pid（shell 的父程序就是 Claude Code）
+async function resolveSnapshotTarget($: EngineInterface): Promise<{ identity: SnapshotIdentity; path: string } | null> {
+  if (snapshotTarget !== undefined) return snapshotTarget
+  const [sessionId, cwd, home] = await Promise.all([$.session.id(), $.session.cwd(), $.env.get('HOME')])
+  const path = home === undefined ? null : snapshotPath(home, sessionId)
+  if (path === null) {
+    snapshotTarget = null
+    return null
+  }
+  let pid: number | null = null
+  try {
+    const parent = Number.parseInt((await $.process.run(['/bin/sh', '-c', 'echo $PPID'], { timeoutMs: 5_000 })).stdout.trim(), 10)
+    if (Number.isInteger(parent) && parent > 1) pid = parent
+  } catch {
+    // 取不到 pid 時外部 App 改用目錄比對
+  }
+  snapshotTarget = { identity: { sessionId, pid, cwd }, path }
+  return snapshotTarget
+}
+
+// ended：session 結束時一定要寫（內容沒變也寫），讓外部 App 知道這份快照不會再更新
+async function writeSnapshot($: EngineInterface, ended = false): Promise<void> {
+  try {
+    const target = await resolveSnapshotTarget($)
+    if (target === null) return
+    const [agents, mainLoop, tasks, waiting, events, now] = await Promise.all([
+      read($, agentsAtom), read($, mainAtom), read($, tasksAtom), read($, waitingAtom), read($, eventsAtom), $.clock.now(),
+    ])
+    const snapshot = buildSnapshot({ agents, mainLoop, tasks, waiting, events }, target.identity, now, ended)
+    const signature = snapshotSignature(snapshot)
+    if (!ended && signature === lastSnapshotSignature) return
+    await $.fs.write(target.path, JSON.stringify(snapshot))
+    lastSnapshotSignature = signature
+  } catch {
+    // 寫不進去就略過，下一次狀態改變再試；面板不受影響
+  }
 }
 
 // 工具結果：累計連續失敗；失敗或被拒絕的記一筆事件，成功的不記（太多）
@@ -331,6 +394,9 @@ function withSubagentNote(prompt: string): string {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    // 新的 session（含 /clear 之後）重新取身分，快照寫到新的檔案
+    snapshotTarget = undefined
+    lastSnapshotSignature = undefined
     // 名稱已被佔用時會被拒絕，不影響其他功能
     // immediate：主對話還在工作時打 /supervisor 也立刻執行；處理時只開關窗格、讀 state，不依賴這一輪的狀態
     await $.command
@@ -347,6 +413,9 @@ export const register: Register = on => {
   on('session.end', async ($, e, next) => {
     stopTimer()
     clearStatus($)
+    snapshotTimer?.cancel()
+    snapshotTimer = undefined
+    await writeSnapshot($, true)
     if (e.reason === 'clear') {
       await update($, agentsAtom, () => []).catch(() => {})
       await update($, mainAtom, () => IDLE_MAIN).catch(() => {})

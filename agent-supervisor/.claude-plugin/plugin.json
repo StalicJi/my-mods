@@ -1,6 +1,6 @@
 {
   "name": "agent-supervisor",
-  "version": "0.1.0",
+  "version": "0.2.2",
   "description": "Agent Supervisor：監控這個 session 的子代理、回報的任務與依賴、可能的阻塞與下一步建議；/supervisor 開關面板",
   "types": "./types/index.d.ts"
 }
