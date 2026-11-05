@@ -29,14 +29,14 @@ describe('派出與重複事件', () => {
 })
 
 describe('活動與工具結果', () => {
-  test('工具呼叫記下最近活動、時間與次數', () => {
-    const agents = recordActivity(addSpawn([], spawn('a1')), 'a1', { activity: '讀取 src/app.ts', at: 2000, isToolCall: true })
-    expect(agents[0]).toMatchObject({ activity: '讀取 src/app.ts', activityAt: 2000, toolCount: 1 })
+  test('工具呼叫記下最近活動與次數', () => {
+    const agents = recordActivity(addSpawn([], spawn('a1')), 'a1', { activity: '讀取 src/app.ts', isToolCall: true })
+    expect(agents[0]).toMatchObject({ activity: '讀取 src/app.ts', toolCount: 1 })
   })
 
   test('不認得的 agentId（例如 Claude Code 內部的 fork）不建立紀錄，原樣回傳', () => {
     const agents = addSpawn([], spawn('a1'))
-    expect(recordActivity(agents, 'fork-x', { activity: '思考中', at: 2000, isToolCall: false })).toBe(agents)
+    expect(recordActivity(agents, 'fork-x', { activity: '思考中', isToolCall: false })).toBe(agents)
   })
 
   test('連續失敗或被拒絕的工具呼叫累計次數並記下第一行錯誤，成功一次就歸零', () => {
@@ -51,7 +51,7 @@ describe('活動與工具結果', () => {
   test('從清單看到 idle 的代理又有新活動時，改回事件確認的 running', () => {
     const idle = reconcile(addSpawn([], spawn('a1')), [listed('a1', 'idle')])
     expect(idle[0]).toMatchObject({ phase: 'idle', source: 'engine' })
-    const active = recordActivity(idle, 'a1', { activity: '思考中', at: 3000, isToolCall: false })
+    const active = recordActivity(idle, 'a1', { activity: '思考中', isToolCall: false })
     expect(active[0]).toMatchObject({ phase: 'running', source: 'event' })
   })
 })
@@ -76,7 +76,7 @@ describe('結束與失敗', () => {
 
   test('結束後才到的工具活動不會把狀態改回 running', () => {
     const done = finishAgent(addSpawn([], spawn('a1')), 'a1', 'answer', 9000)
-    expect(recordActivity(done, 'a1', { activity: '讀取 x', at: 9500, isToolCall: true })[0]).toMatchObject({ phase: 'completed' })
+    expect(recordActivity(done, 'a1', { activity: '讀取 x', isToolCall: true })[0]).toMatchObject({ phase: 'completed' })
   })
 })
 

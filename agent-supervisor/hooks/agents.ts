@@ -13,7 +13,7 @@ export type SpawnFacts = {
 export type FinishReason = 'answer' | 'aborted' | 'error' | 'refusal'
 export type ListedAgent = { id: string; description: string; type: string; status: string; parentId?: string; teammateId?: string; name?: string }
 export type ToolOutcome = { outcome: 'ok' | 'error' | 'denied'; errorLine: string | null }
-type Activity = { activity: string; at: number; isToolCall: boolean }
+type Activity = { activity: string; isToolCall: boolean }
 
 const MAX_AGENTS = 30
 
@@ -57,7 +57,6 @@ function newRecord(facts: RecordFacts, phase: AgentPhase, source: StatusSource):
     failureReason: null,
     endedAt: null,
     activity: '',
-    activityAt: null,
     toolCount: 0,
     toolErrorStreak: 0,
     lastToolError: null,
@@ -114,7 +113,6 @@ export function recordActivity(agents: AgentRecord[], id: string, activity: Acti
           source: 'event',
           detail: null,
           activity: activity.activity,
-          activityAt: activity.at,
           toolCount: agent.toolCount + (activity.isToolCall ? 1 : 0),
         },
   )

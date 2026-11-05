@@ -70,7 +70,7 @@ describe('可能的阻塞（POSSIBLE BLOCKER）', () => {
   })
 
   test('只是跑很久、沒有新事件，不算阻塞', () => {
-    const agents = team().map(agent => ({ ...agent, startedAt: 0, activityAt: 0 }))
+    const agents = team().map(agent => ({ ...agent, startedAt: 0 }))
     expect(detectBlockers(model({ agents }))).toEqual([])
   })
 })

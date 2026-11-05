@@ -5,7 +5,7 @@ import { displayWidth } from '../hooks/text'
 import { agentStatus, overviewRows, viewRows } from '../hooks/view'
 import type { AgentRecord, MainLoop, SupervisorEvent, TaskRecord } from '../types'
 
-const MAIN_IDLE: MainLoop = { isRunning: false, activity: '', activityAt: null }
+const MAIN_IDLE: MainLoop = { isRunning: false, activity: '' }
 const EMPTY = { agents: [] as AgentRecord[], tasks: [] as TaskRecord[], waiting: {}, events: [] as SupervisorEvent[] }
 const spawn = (id: string, patch: object = {}) => ({ id, name: null, agentType: 'general-purpose', description: `任務 ${id}`, parentId: null, startedAt: 0, ...patch })
 const textOf = (row: { text: string }[]) => row.map(span => span.text).join('')
@@ -46,7 +46,7 @@ describe('總覽', () => {
   })
 
   test('沒名字的代理有活動時，第二列寫最近活動', () => {
-    const agents = recordActivity(addSpawn([], spawn('a1', { description: '跑 echo 25 次' })), 'a1', { activity: '執行：echo 第12次', at: 0, isToolCall: true })
+    const agents = recordActivity(addSpawn([], spawn('a1', { description: '跑 echo 25 次' })), 'a1', { activity: '執行：echo 第12次', isToolCall: true })
     const rows = rowsText(overviewRows({ ...EMPTY, agents, mainLoop: MAIN_IDLE }, { columns: 44, now: 0 }))
     const title = rows.findIndex(row => row.includes('跑 echo 25 次'))
     expect(rows[title]).toMatch(/RUNNING$/)
@@ -77,12 +77,12 @@ describe('總覽', () => {
 
   test('窄面板（30 欄）每一列都不超過寬度', () => {
     const agents = addSpawn([], spawn('a1', { name: '很長很長的代理名稱-backend-service', description: '實作 Modbus API 與所有相關的整合測試與文件' }))
-    const rows = overviewRows({ ...EMPTY, agents, mainLoop: { isRunning: true, activity: '檢查 API 合約與前後端的欄位對應', activityAt: 0 } }, { columns: 30, now: 0 })
+    const rows = overviewRows({ ...EMPTY, agents, mainLoop: { isRunning: true, activity: '檢查 API 合約與前後端的欄位對應' } }, { columns: 30, now: 0 })
     for (const row of rows) expect(displayWidth(textOf(row))).toBeLessThanOrEqual(30)
   })
 
   test('主對話跑著時 Supervisor 是 RUNNING 並寫正在做什麼，閒著時寫等你下指令', () => {
-    const running = rowsText(overviewRows({ ...EMPTY, mainLoop: { isRunning: true, activity: '讀取 api.ts', activityAt: 0 } }, { columns: 44, now: 0 }))
+    const running = rowsText(overviewRows({ ...EMPTY, mainLoop: { isRunning: true, activity: '讀取 api.ts' } }, { columns: 44, now: 0 }))
     expect(running[0]).toMatch(/Supervisor.*RUNNING$/)
     expect(running[1]).toContain('讀取 api.ts')
     const idle = rowsText(overviewRows({ ...EMPTY, mainLoop: MAIN_IDLE }, { columns: 44, now: 0 }))
@@ -183,7 +183,7 @@ describe('事件區與分頁', () => {
 
   test('代理頁列出全部代理，每個多一列寫 id、派出者、工具次數與最近活動', () => {
     let agents = backend()
-    agents = recordActivity(agents, 'b', { activity: '讀取 api.ts', at: 0, isToolCall: true })
+    agents = recordActivity(agents, 'b', { activity: '讀取 api.ts', isToolCall: true })
     const rows = rowsText(viewRows('agents', { ...EMPTY, agents, mainLoop: MAIN_IDLE }, { columns: 60, now: 0 }))
     expect(rows.some(row => /backend.*RUNNING$/.test(row))).toBe(true)
     expect(rows).toContain('  任務：實作 API')
@@ -211,7 +211,7 @@ describe('事件區與分頁', () => {
 describe('精簡版（放在輸入框上方）', () => {
   test('每個代理只一列、區塊之間不空行、阻塞一條一列，建議照樣保留', () => {
     let agents = addSpawn(addSpawn([], spawn('b', { name: 'backend' })), spawn('f', { name: 'frontend' }))
-    agents = recordActivity(agents, 'b', { activity: '讀取 api.ts', at: 0, isToolCall: true })
+    agents = recordActivity(agents, 'b', { activity: '讀取 api.ts', isToolCall: true })
     const tasks = [task('B1', 'in_progress', { owner: 'b', title: '定義 API' }), task('F1', 'in_progress', { owner: 'f', title: '畫面', blockedBy: ['B1'] })]
     const rows = rowsText(overviewRows({ ...EMPTY, agents, tasks, mainLoop: MAIN_IDLE }, { columns: 60, now: 0, compact: true }))
     expect(rows).not.toContain(' ')

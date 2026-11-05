@@ -29,7 +29,6 @@ export type AgentRecord = {
   endedAt: number | null
   // 最近一次可觀察到的活動，例如「讀取 src/app.ts」「思考中」
   activity: string
-  activityAt: number | null
   toolCount: number
   // 連續失敗或被拒絕的工具呼叫次數，成功一次就歸零
   toolErrorStreak: number
@@ -40,7 +39,6 @@ export type AgentRecord = {
 export type MainLoop = {
   isRunning: boolean
   activity: string
-  activityAt: number | null
 }
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed'
