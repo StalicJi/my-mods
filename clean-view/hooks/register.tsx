@@ -71,7 +71,7 @@ const isEnabled = atom({ plugin: 'clean-view', key: 'isEnabled' } as const, true
 const plan = atom({ plugin: 'clean-view', key: 'plan' } as const, [] as PlanStep[])
 // 只有 band 讀它，所以動畫只會讓 band 重畫；用 $.ui.invalidate 會連 transcript 每一列都重跑
 const tick = atom({ plugin: 'clean-view', key: 'tick' } as const, 0)
-// 一次工作的起訖時間（含背景子代理跑的時間，見 turn.start）：動畫計時器看它判斷工作是否進行中，標題列用它算經過秒數；
+// 一次工作的起訖時間（含背景子代理、workflow、shell 跑的時間，見 turn.start）：動畫計時器看它判斷工作是否進行中，標題列用它算經過秒數；
 // 合併框要不要顯示看 combinedBox，跟它無關
 const turnClock = atom({ plugin: 'clean-view', key: 'turnClock' } as const, null as TurnClock | null)
 // where-am-i 讀這個值決定要不要讓出位置（where-am-i/hooks/register.tsx 的 cleanViewCombinedBox），改名要兩邊一起改
@@ -142,7 +142,7 @@ const SUBAGENT_LANGUAGE_NOTE = [
   'If the task above explicitly asks for another language or an exact output format, follow the task.',
 ].join('\n')
 
-// 畫面上的步驟狀態：in_progress 依回合是否進行中分成 running 與 paused（例如 Esc 中斷後）
+// 畫面上的步驟狀態：in_progress 依工作是否進行中（含背景工作）分成 running 與 paused（例如 Esc 中斷後）
 type StepDisplay = 'completed' | 'running' | 'paused' | 'pending'
 
 type RowStyle = {
@@ -173,21 +173,23 @@ let animation: { timer: Timer; intervalMs: number } | undefined
 const USER_PROMPT_ORIGINS: readonly string[] = ['composer', 'bridge', 'sdk']
 // 還算在跑的子代理；teammate 等訊息時是 idle，不算
 const ACTIVE_AGENT_STATUSES: readonly string[] = ['pending', 'running', 'waiting']
-// 最近一次 classic.Stop／classic.SubagentStop 回報的背景工作裡，有沒有還沒跑完的 workflow。workflow 的子代理不會出現在
-// $.agent.list()，只有這裡看得到；workflow 跑完會送通知開一個主回合，那一回合結束前的 classic.Stop 就會更新成 false。
-// 背景的 shell、monitor 不算：dev server 這種一直不會結束，算進去計時就停不下來
-let isWorkflowRunning = false
+// 算進經過時間的背景工作。monitor 不算：它只是在等事件，不是工作本身。
+// shell 算進去的代價：Claude 開的 dev server 沒關時，秒數會一直往上算；使用者選擇接受，要看到整個流程的時間
+const TIMED_BACKGROUND_TASK_TYPES: readonly string[] = ['workflow', 'shell']
+// 最近一次 classic.Stop／classic.SubagentStop 回報的背景工作裡，有沒有還沒跑完的 workflow 或 shell。它們不會出現在
+// $.agent.list()，只有這裡看得到；跑完會送通知開一個主回合，那一回合結束前的 classic.Stop 就會更新成 false
+let isTimedBackgroundTaskRunning = false
 
 function noteBackgroundTasks(tasks: readonly { type: string }[] | undefined) {
-  if (tasks !== undefined) isWorkflowRunning = tasks.some(task => task.type === 'workflow')
+  if (tasks !== undefined) isTimedBackgroundTaskRunning = tasks.some(task => TIMED_BACKGROUND_TASK_TYPES.includes(task.type))
 }
 // 下一個主回合是不是使用者自己送出的 prompt 開的：prompt.submit 記下，主回合開始時用掉；
 // 主回合結束時也清掉，回合中送進去的 prompt 不會開新回合，不能留給之後的回合
 let isUserPromptPending = false
 
-// 子代理或 workflow 還有沒跑完的
-async function isAgentWorkRunning($: EngineInterface) {
-  if (isWorkflowRunning) return true
+// 子代理、workflow 或背景 shell 還有沒跑完的
+async function isBackgroundWorkRunning($: EngineInterface) {
+  if (isTimedBackgroundTaskRunning) return true
   try {
     return (await $.agent.list()).some(agent => ACTIVE_AGENT_STATUSES.includes(agent.status))
   } catch {
@@ -201,8 +203,11 @@ async function refreshPlanBand($: EngineInterface) {
   const mode = combinedBoxMode(enabled, steps)
   // 沒變就不寫：寫入會讓讀它的 band（含 where-am-i）重畫
   if (mode !== currentMode) await update($, combinedBox, () => mode)
-  const isWorkRunning = clock !== null && clock.endedAt === null
-  syncAnimation($, enabled && isWorkRunning ? animationIntervalMs(steps) : null)
+  syncAnimation($, enabled && isClockRunning(clock) ? animationIntervalMs(steps) : null)
+}
+
+function isClockRunning(clock: TurnClock | null) {
+  return clock !== null && clock.endedAt === null
 }
 
 function syncAnimation($: EngineInterface, intervalMs: number | null) {
@@ -292,26 +297,26 @@ export const register: Register = on => {
   })
 
   // 經過時間算的是一整次工作：從使用者送出 prompt，到主迴圈的回合結束而且子代理、workflow 都跑完，使用者要看完整跑完花多久。
-  // 派出背景子代理或 workflow 後主迴圈的回合就結束了，跑完會再開一個回合處理回報或通知，這些都接著算。
-  // 只有使用者自己送出 prompt、而且沒有子代理或 workflow 在跑時才從 0 重新算；它們在跑時使用者插話也接著算。
+  // 派出背景子代理、workflow 或 shell 後主迴圈的回合就結束了，跑完會再開一個回合處理回報或通知，這些都接著算。
+  // 只有使用者自己送出 prompt、而且沒有背景工作在跑時才從 0 重新算；它們在跑時使用者插話也接著算。
   // 2.1.299 起子代理開始跑也會發 turn.start（帶 agentId，型別還沒寫），不能從那裡重新計時
   on('turn.start', async ($, e, next) => {
     if (!(e as { agentId?: string }).agentId) {
       const isUserPrompt = isUserPromptPending
       isUserPromptPending = false
       const startedAt = await $.clock.now()
-      const isNewWork = isUserPrompt && !(await isAgentWorkRunning($))
+      const isNewWork = isUserPrompt && !(await isBackgroundWorkRunning($))
       await update($, turnClock, clock => (clock !== null && clock.endedAt === null && !isNewWork ? clock : { startedAt, endedAt: null }))
       await refreshPlanBand($)
     }
     return next(e)
   })
 
-  // 中斷（reason 為 aborted）也會發 turn.complete；子代理或 workflow 還在跑就不停，等它們回報或通知的回合結束再停
+  // 中斷（reason 為 aborted）也會發 turn.complete；背景工作還在跑就不停，等它們回報或通知的回合結束再停
   on('turn.complete', async ($, e, next) => {
     if (!e.agentId) {
       isUserPromptPending = false
-      if (!(await isAgentWorkRunning($))) {
+      if (!(await isBackgroundWorkRunning($))) {
         const endedAt = await $.clock.now()
         await update($, turnClock, clock => (clock ? { ...clock, endedAt } : clock))
       }
@@ -400,7 +405,9 @@ export const register: Register = on => {
     const rowsAbove = rowsAbovePlan(title, summary)
     const gitlabRows = rowsOfGitlabLine(rest)
     const maxRows = e.props.maxRows - (isNextStepsShown ? NEXT_STEPS_LIST_ROWS : 0)
-    const viewFor = (rows: number) => planView(steps, { frame, isWorking: e.props.isWorking, columns: innerColumns, rows })
+    // 主迴圈閒置但背景工作還在跑時，秒數在走，步驟也要顯示進行中，不能寫「暫停」
+    const isWorking = e.props.isWorking || isClockRunning(clock)
+    const viewFor = (rows: number) => planView(steps, { frame, isWorking, columns: innerColumns, rows })
     // 先照有框排：讓出 gitlab-sync 那一段的列數。計畫列數有下限，視窗太矮時還是放不下，就把合併框與 gitlab-sync 那一段的框
     // 一起拿掉（使用者選的「放不下先拿掉框」），省下 4 列；拿掉框時改用兩格內距，文字留在同一欄、可用寬度不變
     const framedView = viewFor(maxRows - BOX_BORDER_ROWS - rowsAbove - gitlabRows)

@@ -576,6 +576,58 @@ describe('clean-view 進度條動畫', () => {
     expect(await elapsedShown($, '36秒')).toBe(true)
   })
 
+  test('背景 shell 也算進去：還在跑就不停、步驟維持進行中，使用者插話接著算，跑完通知的回合結束才停', async ($, on) => {
+    const clock = mock.clock(on)
+    fakeAgents(on)
+    const shellRunning = [{ id: 'sh1', type: 'shell', status: 'running', description: '跑測試', command: 'npm test' }]
+    await start($, on)
+    await $.prompt.submit({ text: '跑測試', origin: { kind: 'composer' } } as any)
+    await $.turn.start({ text: '跑測試', turnId: 'turn-1' } as any)
+    await reportPlan($, STEPS)
+    await clock.advance(3_000)
+    await $.classic.Stop({ stop_hook_active: false, background_tasks: shellRunning } as any)
+    await $.turn.complete({ reason: 'answer', answer: '已在背景跑', durationMs: 3_000 } as any)
+    await clock.advance(20_000)
+    expect(await elapsedShown($, '23秒')).toBe(true)
+    // 主迴圈閒置（isWorking 為 false）但工作還沒結束，不能顯示「暫停」
+    const whileShellRuns = await mountBand($, { isWorking: false })
+    expect(await whileShellRuns.find({ type: 'Text', text: /^進行中$/ })).toBeDefined()
+    expect(await whileShellRuns.find({ type: 'Text', text: /^暫停$/ })).toBeUndefined()
+    await whileShellRuns.unmount()
+
+    await $.prompt.submit({ text: '測試跑完了嗎', origin: { kind: 'composer' } } as any)
+    await $.turn.start({ text: '測試跑完了嗎', turnId: 'turn-2' } as any)
+    await clock.advance(1_000)
+    expect(await elapsedShown($, '24秒')).toBe(true)
+    await $.classic.Stop({ stop_hook_active: false, background_tasks: shellRunning } as any)
+    await $.turn.complete({ reason: 'answer', answer: '還在跑', durationMs: 1_000 } as any)
+
+    await clock.advance(10_000)
+    await $.prompt.submit({ text: '<task-notification>', origin: { kind: 'task-notification' } } as any)
+    await $.turn.start({ text: '<task-notification>', turnId: 'turn-3' } as any)
+    await clock.advance(2_000)
+    await $.classic.Stop({ stop_hook_active: false, background_tasks: [] } as any)
+    await $.turn.complete({ reason: 'answer', answer: '測試通過', durationMs: 2_000 } as any)
+    await clock.advance(5_000)
+    expect(await elapsedShown($, '36秒')).toBe(true)
+    const afterShellEnds = await mountBand($, { isWorking: false })
+    expect(await afterShellEnds.find({ type: 'Text', text: /^暫停$/ })).toBeDefined()
+    await afterShellEnds.unmount()
+  })
+
+  test('背景 monitor 不算：回合結束就停', async ($, on) => {
+    const clock = mock.clock(on)
+    fakeAgents(on)
+    await start($, on)
+    await $.turn.start({ text: '開始', turnId: 'turn-1' } as any)
+    await reportPlan($, STEPS)
+    await clock.advance(3_000)
+    await $.classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 'mo1', type: 'monitor', status: 'running', description: '看 log' }] } as any)
+    await $.turn.complete({ reason: 'answer', answer: '', durationMs: 3_000 } as any)
+    await clock.advance(20_000)
+    expect(await elapsedShown($, '3秒')).toBe(true)
+  })
+
   test('prompt 送出但回合沒開始（例如被擋下）時不跑', async ($, on) => {
     const clock = mock.clock(on)
     await start($, on)
